@@ -1,0 +1,14 @@
+# 忽略 Python 缓存
+__pycache__/
+*.py[cod]
+
+# 忽略你的模型权重和数据集 (太大，GitHub 传不动)
+*.pt
+*.model
+*.xgb
+*.csv
+*.json
+
+# 忽略虚拟环境
+.venv/
+.env
