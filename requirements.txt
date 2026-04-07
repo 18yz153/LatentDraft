@@ -1,0 +1,5 @@
+streamlit
+xgboost
+torch
+numpy
+pandas
