@@ -6,6 +6,8 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn.functional as F
 
+from transformer import DotaMultiTaskTransformer
+
 
 def load_id_to_name(path: Path) -> Dict[int, str]:
     with path.open("r", encoding="utf-8") as f:
@@ -36,6 +38,23 @@ def load_embedding_payload(path: Path) -> Tuple[List[int], torch.Tensor]:
         return hero_pool, state_dict["hero_emb.weight"].detach().cpu()
 
     raise ValueError("unknown embedding payload format")
+
+
+def load_dota_bert_embeddings(path: Path, num_heroes: int, embed_dim: int) -> Tuple[List[int], torch.Tensor]:
+    # Follow the requested extraction flow:
+    # model.hero_emb.weight.data[1:num_heroes+1]
+    model = DotaMultiTaskTransformer(num_heroes=num_heroes, embed_dim=embed_dim)
+    model.load_state_dict(torch.load(path, map_location="cpu"))
+    model.eval()
+
+    all_hero_embeddings = model.hero_emb.weight.data[1 : num_heroes + 1].detach().cpu()
+
+    # Re-pad to align with hero id indexing used by topk_similar (embedding[id]).
+    padded = torch.zeros((num_heroes + 1, all_hero_embeddings.shape[1]), dtype=all_hero_embeddings.dtype)
+    padded[1 : num_heroes + 1] = all_hero_embeddings
+
+    hero_pool = list(range(1, num_heroes + 1))
+    return hero_pool, padded
 
 
 def topk_similar(
@@ -71,6 +90,9 @@ def topk_similar(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inspect hero embedding similarity by hero id")
     parser.add_argument("--embedding", type=Path, default=Path("hero_embedding.pt"))
+    parser.add_argument("--dota-bert", type=Path, default=None, help="optional dota_bert.pt path")
+    parser.add_argument("--num-heroes", type=int, default=145)
+    parser.add_argument("--embed-dim", type=int, default=64)
     parser.add_argument("--hero-id-to-name", type=Path, default=Path("hero_id_to_name.json"))
     parser.add_argument("--hero-id", type=int, required=True)
     parser.add_argument("--topk", type=int, default=10)
@@ -80,7 +102,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    hero_pool, embedding = load_embedding_payload(args.embedding)
+    if args.dota_bert is not None:
+        hero_pool, embedding = load_dota_bert_embeddings(
+            path=args.dota_bert,
+            num_heroes=args.num_heroes,
+            embed_dim=args.embed_dim,
+        )
+    else:
+        hero_pool, embedding = load_embedding_payload(args.embedding)
     id_to_name = load_id_to_name(args.hero_id_to_name)
 
     query_name = id_to_name.get(args.hero_id, "Unknown")
