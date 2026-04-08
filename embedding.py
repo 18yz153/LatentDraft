@@ -3,6 +3,7 @@ import json
 import random
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -51,13 +52,74 @@ def load_hero_id_to_name(path: Path) -> Dict[int, str]:
     with path.open("r", encoding="utf-8") as f:
         raw = json.load(f)
     return {int(k): str(v) for k, v in raw.items()}
+def load_hero_static_json(path: Path) -> Dict[int, Dict]:
+    with path.open("r", encoding="utf-8") as f:
+        raw = json.load(f)
+    return {int(k): v for k, v in raw.items()}
 
+def prepare_static_features(hero_json: dict, num_heroes: int):
+    # 1. 定义特征维度
+    attrs = ['str', 'agi', 'int', 'all']
+    attack_types = ['Melee', 'Ranged']
+    unique_roles = set()
+    for h in hero_json.values():
+        if 'roles' in h and isinstance(h['roles'], list):
+            unique_roles.update(h['roles'])
+    roles_lookup = sorted(list(unique_roles))
+    
+    # 计算总维度: 4(attr) + 2(type) + 9(roles) + 3(数值: ms, range, armor)
+    static_feat_dim = len(attrs) + len(attack_types) + len(roles_lookup) + 3
+    
+    # 初始化全零矩阵 (padding_idx=0 留空)
+    feature_matrix = np.zeros((num_heroes + 1, static_feat_dim), dtype=np.float32)
+    
+    # 2. 收集数值特征用于归一化 (可选，也可以用硬编码的经验值)
+    all_ms = [h['move_speed'] for h in hero_json.values() if h['move_speed']]
+    all_range = [h['attack_range'] for h in hero_json.values() if h['attack_range']]
+    all_armor = [h['base_armor'] for h in hero_json.values() if h['base_armor'] is not None]
+    
+    max_ms, min_ms = max(all_ms), min(all_ms)
+    max_range, min_range = max(all_range), min(all_range)
+    max_armor, min_armor = max(all_armor), min(all_armor)
+
+    for h_id_str, h in hero_json.items():
+        h_id = int(h_id_str)
+        if h_id > num_heroes: continue
+        
+        row = []
+        # One-hot: Primary Attr
+        attr_vec = [1 if h['primary_attr'] == a else 0 for a in attrs]
+        row.extend(attr_vec)
+        
+        # One-hot: Attack Type
+        type_vec = [1 if h['attack_type'] == t else 0 for t in attack_types]
+        row.extend(type_vec)
+        
+        # Multi-hot: Roles
+        role_vec = [1 if r in h['roles'] else 0 for r in roles_lookup]
+        row.extend(role_vec)
+        
+        # Min-Max Normalization: 数值特征
+        # 归一化很重要，否则 315 的移速会直接淹没 0/1 信号
+        ms_norm = (h['move_speed'] - min_ms) / (max_ms - min_ms + 1e-6)
+        range_norm = (h['attack_range'] - min_range) / (max_range - min_range + 1e-6)
+        armor_norm = (h['base_armor'] - min_armor) / (max_armor - min_armor + 1e-6)
+        row.extend([ms_norm, range_norm, armor_norm])
+        
+        feature_matrix[h_id] = np.array(row)
+        
+    return torch.from_numpy(feature_matrix), static_feat_dim
 
 class LatentDraftBPR(nn.Module):
-    def __init__(self, num_heroes: int, embed_dim: int = 64, enemy_weight: float = 0.8):
+    def __init__(self, num_heroes: int, static_feat_dim: int, embed_dim: int = 64, enemy_weight: float = 0.8):
         super().__init__()
         self.hero_emb = nn.Embedding(num_heroes + 1, embed_dim, padding_idx=0)
-        self.hero_bias = nn.Embedding(num_heroes + 1, 1, padding_idx=0)
+        self.static_feats = nn.Parameter(torch.zeros((num_heroes + 1, static_feat_dim)), requires_grad=False)
+        self.static_proj = nn.Sequential(
+            nn.Linear(static_feat_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.Tanh() # 将静态特征输出限制在 [-1, 1]，防止数值爆炸
+        )
         self.context_proj = nn.Sequential(
             nn.Linear(embed_dim * 2, embed_dim),
             nn.LayerNorm(embed_dim),
@@ -67,18 +129,23 @@ class LatentDraftBPR(nn.Module):
         self.enemy_weight = enemy_weight
 
         nn.init.xavier_uniform_(self.hero_emb.weight)
-        nn.init.zeros_(self.hero_bias.weight)
 
+    def get_hero_rep(self, hero_ids: torch.Tensor) -> torch.Tensor:
+        """获取融合了属性和实战的‘英雄最终形态’向量"""
+        dyn_emb = self.hero_emb(hero_ids) # (batch, seq_len, embed_dim)
+        stat_emb = self.static_proj(self.static_feats[hero_ids])
+        combined = dyn_emb + 0.1 * stat_emb
+        return combined
+    
     def get_context_vector(self, ally_ids: torch.Tensor, enemy_ids: torch.Tensor) -> torch.Tensor:
-        ally_emb = self.hero_emb(ally_ids).mean(dim=1)
-        enemy_emb = self.hero_emb(enemy_ids).mean(dim=1)
+        ally_emb = self.get_hero_rep(ally_ids).mean(dim=1)
+        enemy_emb = self.get_hero_rep(enemy_ids).mean(dim=1)
         context_cat = torch.cat([ally_emb, self.enemy_weight * enemy_emb], dim=-1)
         return self.context_proj(context_cat)
 
     def score(self, context_vec: torch.Tensor, hero_ids: torch.Tensor) -> torch.Tensor:
-        hero_vec = self.hero_emb(hero_ids)
-        hero_b = self.hero_bias(hero_ids).squeeze(-1)
-        return (context_vec * hero_vec).sum(dim=-1) + hero_b
+        hero_vec = self.get_hero_rep(hero_ids)
+        return (context_vec * hero_vec).sum(dim=-1)
 
     def forward(
         self,
@@ -114,25 +181,31 @@ class Dota2LineupDataset(Dataset):
         self.samples_per_match = samples_per_match
 
     def __len__(self) -> int:
-        return len(self.matches) * self.samples_per_match * 2
+        return len(self.matches) * self.samples_per_match
 
-    def _build_one(self, match: Dict, use_radiant: bool) -> Dict[str, torch.Tensor]:
-        if use_radiant:
-            ally_team = [int(x) for x in match["radiant_team"]]
-            enemy_team = [int(x) for x in match["dire_team"]]
+    def _build_one(self, match: Dict) -> Dict[str, torch.Tensor]:
+        if bool(match.get("radiant_win", False)):
+            winner_team = [int(x) for x in match["radiant_team"]]
+            loser_team = [int(x) for x in match["dire_team"]]
         else:
-            ally_team = [int(x) for x in match["dire_team"]]
-            enemy_team = [int(x) for x in match["radiant_team"]]
+            winner_team = [int(x) for x in match["dire_team"]]
+            loser_team = [int(x) for x in match["radiant_team"]]
 
-        # Context masking: 从己方挖空 k 个英雄，逐个当正样本。
-        k = random.randint(self.mask_min, self.mask_max)
-        k = max(1, min(k, len(ally_team) - 1))
-        masked_idx = random.sample(range(len(ally_team)), k)
-        pos_idx = random.choice(masked_idx)
+        # 2. 我们只从【胜方】提取正样本逻辑
+        # 这样模型学到的是：针对败方这5个人，胜方这5个人的协同是有效的
+        ally_team = winner_team
+        enemy_team = loser_team
+
+        # 3. 经典的 Context Masking
+        # 随机抠掉一个胜方英雄作为 Positive
+        pos_idx = random.randint(0, 4)
         pos_hero_id = ally_team[pos_idx]
-
         ally_context = [h for i, h in enumerate(ally_team) if i != pos_idx]
-        used_heroes = set(ally_team + enemy_team)
+
+        # 4. 核心改进：负采样策略 (Hard Negative)
+        # 我们不仅要从全池抽路人，还要有概率抽【败方】的英雄作为负样本
+        used_heroes = set(winner_team + loser_team)
+        
         available_neg = list(self.hero_set - used_heroes)
         neg_hero_id = random.choice(available_neg)
 
@@ -144,41 +217,10 @@ class Dota2LineupDataset(Dataset):
         }
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        match_idx = idx // (self.samples_per_match * 2)
-        side_idx = idx % 2
+        match_idx = idx//self.samples_per_match
         match = self.matches[match_idx]
-        use_radiant = side_idx == 0
-        return self._build_one(match, use_radiant=use_radiant)
+        return self._build_one(match)
 
-
-def recommend_similar(
-    emb_weight: torch.Tensor,
-    hero_pool: Sequence[int],
-    hero_id: int,
-    topk: int = 10,
-) -> List[Tuple[int, float]]:
-    if hero_id not in hero_pool:
-        raise ValueError(f"hero_id {hero_id} is not in hero_pool")
-
-    valid_ids = torch.tensor(hero_pool, dtype=torch.long)
-    valid_vecs = emb_weight[valid_ids]
-    valid_vecs = F.normalize(valid_vecs, p=2, dim=1)
-
-    target_pos = hero_pool.index(hero_id)
-    target_vec = valid_vecs[target_pos : target_pos + 1]
-
-    sims = (valid_vecs @ target_vec.t()).squeeze(1)
-    sims[target_pos] = -1.0
-
-    topk = min(topk, len(hero_pool) - 1)
-    vals, idxs = torch.topk(sims, k=topk, largest=True)
-
-    out: List[Tuple[int, float]] = []
-    for i in range(topk):
-        hid = int(valid_ids[idxs[i]].item())
-        score = float(vals[i].item())
-        out.append((hid, score))
-    return out
 
 
 def train(args: argparse.Namespace) -> None:
@@ -187,7 +229,8 @@ def train(args: argparse.Namespace) -> None:
     matches = load_matches(args.data)
     hero_pool = build_hero_pool(matches)
     num_heroes = max(hero_pool)
-
+    hero_json = load_hero_static_json(args.hero_file) 
+    static_feats, static_feat_dim = prepare_static_features(hero_json, num_heroes)
     dataset = Dota2LineupDataset(
         matches=matches,
         hero_pool=hero_pool,
@@ -212,9 +255,11 @@ def train(args: argparse.Namespace) -> None:
 
     model = LatentDraftBPR(
         num_heroes=num_heroes,
+        static_feat_dim=static_feat_dim,
         embed_dim=args.embed_dim,
         enemy_weight=args.enemy_weight,
     ).to(device)
+    model.static_feats.data.copy_(static_feats)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     print(
@@ -241,6 +286,9 @@ def train(args: argparse.Namespace) -> None:
 
             total_loss += float(loss.item())
             steps += 1
+            # 在每个 epoch 结束时打印：
+        dyn_norm = model.hero_emb.weight.norm(dim=-1).mean().item()
+        print(f"动态 Embedding 平均模长: {dyn_norm:.4f}")
 
         avg_loss = total_loss / max(steps, 1)
         print(f"epoch={epoch} avg_bpr_loss={avg_loss:.6f}")
@@ -257,37 +305,33 @@ def train(args: argparse.Namespace) -> None:
     }
     torch.save(ckpt, args.out_ckpt)
 
+    model.eval()
+    with torch.no_grad():
+        # 生成 0 到 num_heroes 的 Tensor
+        all_hero_ids = torch.arange(0, num_heroes + 1, dtype=torch.long, device=device)
+        # 调用模型的 get_hero_rep，拿到融合了 JSON 和实战的终极向量！
+        fused_embeddings = model.get_hero_rep(all_hero_ids)
+        emb_weight_to_save = fused_embeddings.detach().cpu()
+
+    # 然后再保存这个融合后的向量
     emb_payload = {
         "hero_pool": hero_pool,
-        "embedding": emb_weight,
+        "embedding": emb_weight_to_save, 
     }
     torch.save(emb_payload, args.out_embedding)
-    print(f"saved checkpoint -> {args.out_ckpt}")
-    print(f"saved embedding -> {args.out_embedding}")
 
-    if args.query_hero_id is not None:
-        recs = recommend_similar(
-            emb_weight=emb_weight,
-            hero_pool=hero_pool,
-            hero_id=args.query_hero_id,
-            topk=args.topk,
-        )
-        query_name = hero_id_to_name.get(args.query_hero_id, "Unknown")
-        print(f"top-{len(recs)} similar heroes for hero_id={args.query_hero_id} ({query_name}):")
-        for hid, sim in recs:
-            hero_name = hero_id_to_name.get(hid, "Unknown")
-            print(f"hero_id={hid} hero_name={hero_name} cosine={sim:.4f}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BPR hero embedding with context masking")
     parser.add_argument("--data", type=Path, default=Path("data.json"))
     parser.add_argument("--hero-id-to-name", type=Path, default=Path("hero_id_to_name.json"))
+    parser.add_argument("--hero-file", type=Path, default=Path("heroes.json"))
     parser.add_argument("--out-ckpt", type=Path, default=Path("bpr_context_model.pt"))
     parser.add_argument("--out-embedding", type=Path, default=Path("hero_embedding.pt"))
 
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--embed-dim", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"])
@@ -305,7 +349,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.weight_decay = 1e-4
-    args.enemy_weight = 0.8
+    args.enemy_weight = 1
     train(args)
 
 

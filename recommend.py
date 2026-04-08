@@ -54,7 +54,46 @@ def recommend(current_ally, current_enemy, bst_model, hero_embeddings, valid_her
 
     results = sorted(zip(candidates, probs), key=lambda x: x[1], reverse=True)
     return results[:topk]
+    
+def get_ablation_explanation(target_hero_id, current_ally, current_enemy, bst_model, hero_embeddings):
+    """
+    计算推荐英雄的核心克制目标和最佳搭配队友
+    返回: 
+        enemy_deltas: list of (enemy_id, delta) 按克制贡献度降序
+        ally_deltas: list of (ally_id, delta) 按配合贡献度降序
+    """
+    v_a = np.mean([hero_embeddings[h] for h in current_ally], axis=0) if current_ally else np.zeros(64)
+    v_e = np.mean([hero_embeddings[h] for h in current_enemy], axis=0) if current_enemy else np.zeros(64)
+    base_feat = np.concatenate([v_a, v_e, hero_embeddings[target_hero_id]])
+    base_prob = bst_model.predict(xgb.DMatrix(np.array([base_feat])))[0]
 
+    enemy_deltas = []
+    # 1. 找敌方靶点 (所有人)
+    for enemy in current_enemy:
+        temp_enemy = [e for e in current_enemy if e != enemy]
+        temp_v_e = np.mean([hero_embeddings[h] for h in temp_enemy], axis=0) if temp_enemy else np.zeros(64)
+        temp_feat = np.concatenate([v_a, temp_v_e, hero_embeddings[target_hero_id]])
+        temp_prob = bst_model.predict(xgb.DMatrix(np.array([temp_feat])))[0]
+        
+        delta = base_prob - temp_prob
+        enemy_deltas.append((enemy, float(delta)))
+
+    ally_deltas = []
+    # 2. 找己方大腿 (所有人)
+    for ally in current_ally:
+        temp_ally = [a for a in current_ally if a != ally]
+        temp_v_a = np.mean([hero_embeddings[h] for h in temp_ally], axis=0) if temp_ally else np.zeros(64)
+        temp_feat = np.concatenate([temp_v_a, v_e, hero_embeddings[target_hero_id]])
+        temp_prob = bst_model.predict(xgb.DMatrix(np.array([temp_feat])))[0]
+        
+        delta = base_prob - temp_prob
+        ally_deltas.append((ally, float(delta)))
+
+    # 按贡献值从大到小排序
+    enemy_deltas.sort(key=lambda x: x[1], reverse=True)
+    ally_deltas.sort(key=lambda x: x[1], reverse=True)
+
+    return enemy_deltas, ally_deltas
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Load saved XGB model and recommend heroes")

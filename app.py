@@ -4,7 +4,7 @@ import json
 import streamlit as st
 import xgboost as xgb
 
-from recommend import load_embedding_payload, load_hero_id_to_name, recommend
+from recommend import load_embedding_payload, load_hero_id_to_name, recommend, get_ablation_explanation
 
 
 st.set_page_config(page_title="LatentDraft - Dota 2 阵容助手", layout="wide")
@@ -183,9 +183,37 @@ with right_col:
         )
 
         st.subheader("推荐 Pick")
-        for hero_id, score in pick_results:
+        for i, (hero_id, score) in enumerate(pick_results):
             name = hero_id_to_name.get(int(hero_id), "Unknown")
-            st.write(f"{hero_id}: {name}  |  score={float(score):.4f}")
+            
+            # 使用 container 让每个英雄的展示更紧凑
+            with st.container():
+                cols = st.columns([1, 4])
+                with cols[0]:
+                    # 显示英雄小头像
+                    st.image(hero_image_url(hero_id, name), use_container_width=True)
+                with cols[1]:
+                    st.markdown(f"**{i+1}. {name}** (预测得分: `{float(score):.2f}`)")
+                    
+                    # 💡 核心：为 Top 5 英雄提供 AI 解释引擎
+                    if i < 5 and (st.session_state.ally_team or st.session_state.enemy_team):
+                        enemy_deltas, ally_deltas = get_ablation_explanation(
+                            hero_id, st.session_state.ally_team, st.session_state.enemy_team, 
+                            bst_model, hero_embeddings
+                        )
+                        
+                        reasons = []
+                        # 阈值设定：如果贡献度大于 1%，我们就认为它是一个有效的战术针对
+                        for counter_id, counter_delta in enemy_deltas:
+                            c_name = hero_id_to_name.get(counter_id, "Unknown")
+                            reasons.append(f"⚔️ **克制**: {c_name} ({counter_delta*100:.1f}%)")
+                            
+                        for ally_id, ally_delta in ally_deltas:
+                            a_name = hero_id_to_name.get(ally_id, "Unknown")
+                            reasons.append(f"🤝 **配合**: {a_name} ({ally_delta*100:.1f}%)")
+                            
+                        if reasons:
+                            st.caption(" | ".join(reasons))
 
         st.divider()
         st.subheader("推荐 Ban")
