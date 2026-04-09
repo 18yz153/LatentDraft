@@ -7,12 +7,13 @@ from typing import List, Tuple, Dict
 
 import torch.nn as nn
 import torch.nn.functional as F
+from utils import get_number_of_heroes
 
 class TransformerInferenceEngine(nn.Module):
     def __init__(self, model_path, num_heroes, embed_dim=64, nhead=8, num_layers=3):
         super().__init__()
         # 必须与训练时的参数完全一致，否则 load_state_dict 会报错
-        self.hero_emb = nn.Embedding(num_heroes + 2, embed_dim, padding_idx=0)
+        self.hero_emb = nn.Embedding(num_heroes + 1, embed_dim, padding_idx=0)
         self.side_emb = nn.Embedding(2, embed_dim)
 
         self.win_token = nn.Parameter(torch.randn(1, 1, embed_dim))
@@ -46,7 +47,7 @@ class TransformerInferenceEngine(nn.Module):
         self.load_state_dict(new_state_dict)
         self.eval()
 
-    def forward_with_attn(self, hero_ids, side_ids):
+    def forward_with_attn(self, hero_ids, side_ids, mask_pos=None):
         """特殊的 forward，返回胜率的同时返回最后一层 attention"""
         batch_size = hero_ids.shape[0]
         x = self.hero_emb(hero_ids) + self.side_emb(side_ids)
@@ -77,11 +78,25 @@ class TransformerInferenceEngine(nn.Module):
                 # [0, :] 这一行代表了 win_token 对全场 10 个英雄的关注度
                 last_weights = weights 
 
+        mask_logits = None
+        if mask_pos is not None:
+            # mask_pos 是 0-9，对应 features 里的索引是 1-10
+            # 我们可以通过 gather 拿到对应的 token 特征
+            # indices 形状为 [Batch, 1, Hidden_Dim]
+            idx = (mask_pos + 1).view(batch_size, 1, 1).expand(-1, -1, features.size(-1))
+            target_feat = features.gather(1, idx).squeeze(1) # [Batch, Hidden_Dim]
+            mask_logits = self.mask_head(target_feat) # [Batch, Num_Heroes + 1]
+        else:
+            # 如果没有指定特定位置，通常返回全场的 mask 预测（用于展示建议）
+            # 取除了 win_token 以外的所有位置 [Batch, 10, Hidden_Dim]
+            all_hero_feats = features[:, 1:, :]
+            mask_logits = self.mask_head(all_hero_feats) # [Batch, 10, Num_Heroes + 1]
         # 4. 【核心修改】：只取第 0 个位置的特征给 win_head
         global_feat = features[:, 0, :] 
         win_logits = self.win_head(global_feat)
+
         
-        return torch.sigmoid(win_logits), last_weights
+        return torch.sigmoid(win_logits),mask_logits, last_weights
 
 
 class BaseInference(ABC):
@@ -157,21 +172,57 @@ class TransformerInference(BaseInference):
 
     def recommend(self, current_ally, current_enemy, valid_hero_ids, mode="pick", topk=10):
         used = set(current_ally + current_enemy)
-        candidates = [h for h in valid_hero_ids if h not in used]
+        temp_a = (current_ally + [0]*5)[:5]
+        temp_e = (current_enemy + [0]*5)[:5]
+        lineup = temp_a + temp_e
         is_ally = (mode == "pick")
+        if is_ally:
+            mask_idx_in_seq = len(current_ally) 
+            if mask_idx_in_seq >= 5:
+                return [] # 已经满员了，没位置了
+        else:
+            mask_idx_in_seq = 5 + len(current_enemy)
+            if mask_idx_in_seq >= 10:
+                return [] # 已经满员了，没位置了
+
         
-        results = []
+        seq = torch.tensor([lineup]).to(self.device)
+        sides = torch.tensor([[0]*5 + [1]*5]).to(self.device)
         with torch.no_grad():
-            for h in candidates:
-                temp_a = (current_ally + ([h] if is_ally else []) + [0]*5)[:5]
-                temp_e = (current_enemy + ([h] if not is_ally else []) + [0]*5)[:5]
-                seq = torch.tensor([temp_a + temp_e]).to(self.device)
-                sides = torch.tensor([[0]*5 + [1]*5]).to(self.device)
-                
-                prob, _ = self.engine.forward_with_attn(seq, sides)
-                results.append((h, prob.item()))
+            _, mask_logits, _ = self.engine.forward_with_attn(seq, sides)
+            probs = torch.softmax(mask_logits[0, mask_idx_in_seq], dim=-1)
+        candidate_probs, candidate_ids = torch.topk(probs, k=50)
+        print("Raw candidates:", list(zip(candidate_ids.cpu().numpy(), candidate_probs.cpu().numpy())))
+        refined_candidates = []
+        for p, h_id in zip(candidate_probs.tolist(), candidate_ids.tolist()):
+            if h_id in valid_hero_ids and h_id not in used:
+                refined_candidates.append(h_id)
+            if len(refined_candidates) >= 30: # 拿 30 个种子选手去精选
+                break
+        print("Refined candidates:", refined_candidates)
+        final_lineups = []
+        for h in refined_candidates:
+            case_lineup = list(lineup)
+            case_lineup[mask_idx_in_seq] = h
+            final_lineups.append(case_lineup)
+        batch_seq = torch.tensor(final_lineups).to(self.device)
+        batch_sides = torch.tensor([[0]*5 + [1]*5] * len(final_lineups)).to(self.device)
         
-        return sorted(results, key=lambda x: x[1], reverse=True)[:topk]
+        with torch.no_grad():
+            win_probs, _, _ = self.engine.forward_with_attn(batch_seq, batch_sides)
+            win_probs = win_probs.squeeze().cpu().numpy()       
+
+        final_results = []
+        # 如果只有一个候选人，win_probs 会变成标量，处理一下
+        if len(refined_candidates) == 1:
+            final_results.append((refined_candidates[0], float(win_probs)))
+        else:
+            for h, wp in zip(refined_candidates, win_probs):
+                final_results.append((h, float(wp)))         
+        if mode == "pick":
+            return sorted(final_results, key=lambda x: x[1], reverse=True)[:topk]
+        else:
+            return sorted(final_results, key=lambda x: x[1], reverse=False)[:topk]
 
     def get_explanation(self, target_hero_id, current_ally, current_enemy):
         # 1. 基础阵容构造 [Ally x 5, Enemy x 5]
@@ -199,7 +250,7 @@ class TransformerInference(BaseInference):
         
         with torch.no_grad():
             # 这里只需拿第一行的 weights (完整阵容的注意力)
-            probs, all_weights = self.engine.forward_with_attn(batch_seq, batch_sides)
+            probs,_, all_weights = self.engine.forward_with_attn(batch_seq, batch_sides)
             
         base_prob = probs[0].item()
         attn_row = all_weights[0, target_pos].cpu().numpy() # [10]
@@ -245,7 +296,7 @@ class TransformerInference(BaseInference):
         # 2. 运行模型拿到全量数据 [1, 11, 11]
         # 使用 torch.no_grad() 确保推理时不计算梯度，减少内存占用
         with torch.no_grad():
-            win_prob, last_weights = self.engine.forward_with_attn(hero_ids, side_ids)
+            win_prob,_, last_weights = self.engine.forward_with_attn(hero_ids, side_ids)
             
             # 【核心修正】：增加 .detach() 以剥离梯度
             attn_matrix = last_weights[0].detach().cpu().numpy() # [11, 11]

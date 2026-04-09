@@ -35,3 +35,6 @@ def load_hero_id_to_url_name(path: Path) -> Dict[int, str]:
     with path.open("r", encoding="utf-8") as f:
         raw = json.load(f)
     return {int(k): str(v) for k, v in raw.items()}
+def get_number_of_heroes(path: Path) -> int:
+    load_hero_id_to_name(path)
+    return max(load_hero_id_to_name(path).keys())

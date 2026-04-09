@@ -73,12 +73,15 @@ class DotaMultiTaskDataset(Dataset):
     def __init__(self, matches, num_heroes):
         self.matches = matches # load_matches 处理好的 [winner, loser] 列表
         self.num_heroes = num_heroes
-        self.mask_token_id = num_heroes + 1 # 用一个特殊 ID 代表 MASK，确保它不和任何英雄 ID 冲突
+        self.mask_token_id = 0
+        self.ignore_index = -100
+        self.sample_multiplier = 3
     def __len__(self):
-        return len(self.matches)
+        return len(self.matches)*self.sample_multiplier
 
     def __getitem__(self, idx):
-        m = self.matches[idx]
+        real_idx = idx % len(self.matches)
+        m = self.matches[real_idx]
         if bool(m.get("radiant_win", False)):
             winner_team = [int(x) for x in m["radiant_team"]]
             loser_team = [int(x) for x in m["dire_team"]]
@@ -90,32 +93,51 @@ class DotaMultiTaskDataset(Dataset):
         else:
             ally_pool, enemy_pool, win_label = loser_team, winner_team, 0.0
 
+        r = random.random()
+        if r < 0.2:
+            total_mask_count = 0
+        elif r < 0.5:
+            total_mask_count = random.randint(1, 2)
+        elif r < 0.8:
+            total_mask_count = random.randint(3, 4)
+        else:
+            # 20% 概率挖 4-8 个，但为了保证至少 1v1，上限设为 8
+            total_mask_count = random.randint(4, 8)
+        mask_ally_count = total_mask_count // 2
+        mask_enemy_count = total_mask_count - mask_ally_count
+        if random.random() > 0.5:
+            mask_ally_count, mask_enemy_count = mask_enemy_count, mask_ally_count
 
-        # 构造长度 10 的序列
+        # 4. 执行挖空
+        # 采样索引：从 [0,1,2,3,4] 选 ally 的坑，从 [5,6,7,8,9] 选 enemy 的坑
+        ally_indices = random.sample(range(0, 5), mask_ally_count)
+        enemy_indices = random.sample(range(5, 10), mask_enemy_count)
+        all_mask_indices = ally_indices + enemy_indices
+
         full_seq = ally_pool + enemy_pool
-        # 这里的 mask_idx 必须落在 [0, 9] 之间，确保遮住的是个英雄而不是 0
-        local_mask_idx = random.randint(0, 9) 
-        target_hero = full_seq[local_mask_idx]
-        
         masked_seq = list(full_seq)
-        masked_seq[local_mask_idx] = self.mask_token_id # 用特殊 ID 代表 MASK
+        
+        # 准备 Mask 任务的标签：只有被挖掉的位置才有真实 ID，其余为 ignore_index
+        target_labels = [self.ignore_index] * 10 
+        
+        for i in all_mask_indices:
+            target_labels[i] = full_seq[i] # 记录原英雄 ID 用于 Loss
+            masked_seq[i] = self.mask_token_id # 填入 0 (Mask)
 
-        # side_ids: [0,0,0,0,0, 1,1,1,1,1] 区分敌我
         side_ids = [0]*5 + [1]*5
 
         return (
             torch.tensor(masked_seq, dtype=torch.long), 
             torch.tensor(side_ids, dtype=torch.long),
-            torch.tensor(target_hero, dtype=torch.long), # Mask 任务的标签
-            torch.tensor(local_mask_idx, dtype=torch.long),
-            torch.tensor([win_label], dtype=torch.float) # 胜率任务的标签
+            torch.tensor(target_labels, dtype=torch.long), # [10] 维标签
+            torch.tensor([win_label], dtype=torch.float)
         )
     
 class DotaMultiTaskTransformer(nn.Module):
     def __init__(self, num_heroes, embed_dim=64, nhead=8, num_layers=3):
         super().__init__()
         # 1. 共享 Embedding 层 (这就是你之后用来查“谁和 Puck 近”的)
-        self.hero_emb = nn.Embedding(num_heroes + 2, embed_dim, padding_idx=0)
+        self.hero_emb = nn.Embedding(num_heroes + 1, embed_dim)
         self.side_emb = nn.Embedding(2, embed_dim) # 0: 盟友, 1: 敌人
         self.win_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         # 2. 共享 Transformer Encoder 层
@@ -125,7 +147,7 @@ class DotaMultiTaskTransformer(nn.Module):
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         # 3. 头 A: Mask 预测 (输出 130 维，看哪个英雄概率最高)
-        self.mask_head = nn.Linear(embed_dim, num_heroes + 1)
+        self.mask_head = nn.Linear(embed_dim, num_heroes+1)
 
         # 4. 头 B: 胜率预测 (输出 1 维)
         self.win_head = nn.Sequential(
@@ -145,10 +167,7 @@ class DotaMultiTaskTransformer(nn.Module):
         # 拼接到序列最前面 (位置 0)
         x = torch.cat([w_token_with_side, x], dim=1)
 
-        win_mask = torch.zeros((batch_size, 1), dtype=torch.bool, device=x.device)
-        pad_mask = (hero_ids == 0)
-        full_mask = torch.cat([win_mask, pad_mask], dim=1)
-        features = self.transformer(x, src_key_padding_mask=full_mask) 
+        features = self.transformer(x) 
         
         hero_features = features[:, 1:, :]
         mask_logits = self.mask_head(hero_features)
@@ -168,7 +187,7 @@ def run_train():
     
     hero_pool = build_hero_pool(matches)
     num_heroes = max(hero_pool)
-    batch_size = 128
+    batch_size = 512
     epochs = 50
     patience = 5
     patience_counter=0
@@ -178,15 +197,15 @@ def run_train():
 
     # 2. 构造 Dataset 和 DataLoader
     dataset = DotaMultiTaskDataset(matches, num_heroes=num_heroes)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4,pin_memory=True)
     
     # 3. 初始化模型、损失函数、优化器
     model = DotaMultiTaskTransformer(num_heroes=num_heroes, embed_dim=64).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=4e-4)
     
     # reduction='none' 是关键，允许我们逐样本过滤
     criterion_mask = nn.CrossEntropyLoss(reduction='none') 
-    criterion_win = nn.BCEWithLogitsLoss()
+    criterion_win = nn.BCEWithLogitsLoss(reduction='none')
 
     # 4. 训练循环
     for epoch in range(epochs):
@@ -195,12 +214,11 @@ def run_train():
         total_win_loss = 0
         total_mask_loss = 0
         
-        for batch_idx, (masked_seq, side_ids, target_hero, mask_pos, win_label) in enumerate(dataloader):
+        for batch_idx, (masked_seq, side_ids, target_hero_labels, win_label) in enumerate(dataloader):
             # 将数据推入 GPU
             masked_seq = masked_seq.to(device)
             side_ids = side_ids.to(device)
-            target_hero = target_hero.to(device)
-            mask_pos = mask_pos.to(device)
+            target_hero_labels = target_hero_labels.to(device)
             win_label = win_label.to(device)
             
             optimizer.zero_grad()
@@ -209,24 +227,19 @@ def run_train():
             mask_logits, win_logits = model(masked_seq, side_ids)
             
             # 计算 Win Loss
-            loss_win = criterion_win(win_logits, win_label)
+            known_count = (masked_seq != 0).sum(dim=1).float() 
+            # 线性权重：10个英雄权重1.0，1个英雄权重0.1
+            win_loss_weights = known_count / 10.0
+            raw_win_loss = criterion_win(win_logits.squeeze(), win_label.squeeze()) 
+            loss_win = (raw_win_loss * win_loss_weights).mean()
             
-            # 计算 Mask Loss (高级矩阵过滤)
-            b_size = masked_seq.size(0)
-            batch_idx_tensor = torch.arange(b_size).to(device)
-            
-            # 提取每一个 batch 样本中被 mask 掉的那个位置的 logits
-            pos_logits = mask_logits[batch_idx_tensor, mask_pos] # [B, num_heroes + 1]
-            
-            # 算出所有样本的原始交叉熵
-            raw_mask_loss = criterion_mask(pos_logits, target_hero) # [B]
-            
-            # 仅保留 win_label 为 1 的样本损失 (win_label.squeeze() 包含 1.0 或 0.0)
-            mask_weights = win_label.squeeze() # 形状 [B]
-            # 算总和，除以有效(赢局)的数量，clamp 防止除以 0
-            filtered_mask_loss = (raw_mask_loss * mask_weights).sum() / mask_weights.sum().clamp(min=1.0)            
+            raw_mask_loss = F.cross_entropy(
+                mask_logits.view(-1, num_heroes+1), 
+                target_hero_labels.view(-1), 
+                ignore_index=-100
+            )      
             # 总损失合并
-            total_loss = loss_win + 0.15 * filtered_mask_loss
+            total_loss = loss_win + 0.15 * raw_mask_loss
             
             # 反向传播
             total_loss.backward()
@@ -234,7 +247,7 @@ def run_train():
             
             total_epoch_loss += total_loss.item()
             total_win_loss += loss_win.item()
-            total_mask_loss += filtered_mask_loss.item()
+            total_mask_loss += raw_mask_loss.item()
             
         current_avg_loss = total_epoch_loss / len(dataloader)        
         print(f"--- Epoch {epoch} End | Avg Loss: {total_epoch_loss / len(dataloader):.4f} (Win: {total_win_loss / len(dataloader):.4f}, Mask: {total_mask_loss / len(dataloader):.4f}) ---")
