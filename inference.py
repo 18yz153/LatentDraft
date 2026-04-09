@@ -7,7 +7,6 @@ from typing import List, Tuple, Dict
 
 import torch.nn as nn
 import torch.nn.functional as F
-from utils import get_number_of_heroes
 
 class TransformerInferenceEngine(nn.Module):
     def __init__(self, model_path, num_heroes, embed_dim=64, nhead=8, num_layers=3):

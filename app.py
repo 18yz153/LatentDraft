@@ -3,9 +3,23 @@ import json
 
 import streamlit as st
 import xgboost as xgb
-from utils import load_embedding_payload, load_hero_id_to_name, load_hero_id_to_url_name
+from src.utils import load_embedding_payload, load_hero_id_to_name, load_hero_id_to_url_name
 from inference import XGBInference, TransformerInference
 import plotly.express as px
+
+ROOT_DIR = Path(__file__).resolve().parent
+DATA_DIR = ROOT_DIR / "data"
+MODELS_DIR = ROOT_DIR / "models"
+
+
+def list_model_files(suffixes=None):
+    if not MODELS_DIR.exists():
+        return []
+
+    files = [p.name for p in MODELS_DIR.iterdir() if p.is_file()]
+    if suffixes is not None:
+        files = [name for name in files if Path(name).suffix.lower() in suffixes]
+    return sorted(files)
 
 st.set_page_config(page_title="LatentDraft - Dota 2 阵容助手", layout="wide")
 
@@ -59,23 +73,34 @@ if "enemy_team" not in st.session_state:
 with st.expander("⚙️ 模型配置与设置 (选好后可折叠以释放空间)", expanded=False):
     # 横向排列三个设置项，极限压缩垂直空间
     cfg_cols = st.columns(3)
+    xgb_files = list_model_files({".model", ".json", ".ubj", ".bin"})
+    torch_files = list_model_files({".pt", ".pth"})
     
     with cfg_cols[0]:
         m_type = st.selectbox("核心算法", ["Transformer", "XGBoost"])
     
     with cfg_cols[1]:
         if m_type == "XGBoost":
-            m_path = st.text_input("XGB File", "xgb_bp.model")
+            xgb_options = xgb_files if xgb_files else ["xgb_bp.model"]
+            xgb_default = xgb_options.index("xgb_bp.model") if "xgb_bp.model" in xgb_options else 0
+            selected_xgb = st.selectbox("XGB File", xgb_options, index=xgb_default)
+            m_path = str(MODELS_DIR / selected_xgb)
         else:
-            m_path = st.text_input("Transformer File", "dota_bert.pt")
+            transformer_options = torch_files if torch_files else ["dota_bert.pt"]
+            transformer_default = transformer_options.index("dota_bert.pt") if "dota_bert.pt" in transformer_options else 0
+            selected_transformer = st.selectbox("Transformer File", transformer_options, index=transformer_default)
+            m_path = str(MODELS_DIR / selected_transformer)
             
     with cfg_cols[2]:
         if m_type == "XGBoost":
-            e_path = st.text_input("Emb File", "hero_embedding.pt")
+            emb_options = torch_files if torch_files else ["hero_embedding.pt"]
+            emb_default = emb_options.index("hero_embedding.pt") if "hero_embedding.pt" in emb_options else 0
+            selected_emb = st.selectbox("Emb File", emb_options, index=emb_default)
+            e_path = str(MODELS_DIR / selected_emb)
         else:
             e_path = None
             st.caption("Transformer 无需外部 Emb")
-hero_name_path = "hero_id_to_name.json"
+hero_name_path = str(DATA_DIR / "hero_id_to_name.json")
 # 加载引擎
 engine, hero_id_to_name, valid_hero_ids = load_engine(m_type, m_path, e_path, hero_name_path)
 
@@ -96,7 +121,7 @@ def remove_hero(hero_id: int, side: str) -> None:
         st.session_state.ally_team = [h for h in st.session_state.ally_team if h != hero_id]
     else:
         st.session_state.enemy_team = [h for h in st.session_state.enemy_team if h != hero_id]
-hero_name_path = "hero_id_to_url_name.json"
+hero_name_path = str(DATA_DIR / "hero_id_to_url_name.json")
 hero_id_to_url_name = load_hero_id_to_url_name(Path(hero_name_path))
 def hero_image_url(hero_id: int, hero_name: str) -> str:
     url_name = hero_id_to_url_name.get(hero_id, fallback_url_name(hero_name))

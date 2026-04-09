@@ -131,10 +131,10 @@ def load_matches(path: Path):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train XGBoost model from hero embeddings")
-    parser.add_argument("--matches", type=Path, default=Path("data.json"))
-    parser.add_argument("--embedding", type=Path, default=Path("hero_embedding.pt"))
-    parser.add_argument("--hero-id-to-name", type=Path, default=Path("hero_id_to_name.json"))
-    parser.add_argument("--model-out", type=Path, default=Path("xgb_bp.model"))
+    parser.add_argument("--matches", type=Path, default=Path("data/data.json"))
+    parser.add_argument("--embedding", type=Path, default=Path("models/hero_embedding.pt"))
+    parser.add_argument("--hero-id-to-name", type=Path, default=Path("data/hero_id_to_name.json"))
+    parser.add_argument("--model-out", type=Path, default=Path("models/xgb_bp.model"))
     parser.add_argument("--num-heroes", type=int, default=150)
     parser.add_argument("--max-depth", type=int, default=6)
     parser.add_argument("--num-boost-round", type=int, default=100)

@@ -324,11 +324,11 @@ def train(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BPR hero embedding with context masking")
-    parser.add_argument("--data", type=Path, default=Path("data.json"))
-    parser.add_argument("--hero-id-to-name", type=Path, default=Path("hero_id_to_name.json"))
-    parser.add_argument("--hero-file", type=Path, default=Path("heroes.json"))
-    parser.add_argument("--out-ckpt", type=Path, default=Path("bpr_context_model.pt"))
-    parser.add_argument("--out-embedding", type=Path, default=Path("hero_embedding.pt"))
+    parser.add_argument("--data", type=Path, default=Path("data/data.json"))
+    parser.add_argument("--hero-id-to-name", type=Path, default=Path("data/hero_id_to_name.json"))
+    parser.add_argument("--hero-file", type=Path, default=Path("data/heroes.json"))
+    parser.add_argument("--out-ckpt", type=Path, default=Path("models/bpr_context_model.pt"))
+    parser.add_argument("--out-embedding", type=Path, default=Path("models/hero_embedding.pt"))
 
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=1024)

@@ -180,25 +180,31 @@ class DotaMultiTaskTransformer(nn.Module):
 def run_train():
     # 1. 基础配置
     try:
-        matches = load_matches(Path("data.json"))
+        matches = load_matches(Path("data/data.json"))
         print(f"Loaded {len(matches)} matches.")
     except FileNotFoundError:
-        raise FileNotFoundError("data.json not found. Using dummy data for testing.")
+        raise FileNotFoundError("data/data.json not found. Using dummy data for testing.")
     
     hero_pool = build_hero_pool(matches)
     num_heroes = max(hero_pool)
     batch_size = 512
     epochs = 50
+
     patience = 5
     patience_counter=0
     best_loss = float('inf')
+    best_val_acc = 0
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-
+    val_size = 3000 
+    val_matches = matches[:val_size]
+    train_matches = matches[val_size:]
     # 2. 构造 Dataset 和 DataLoader
-    dataset = DotaMultiTaskDataset(matches, num_heroes=num_heroes)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4,pin_memory=True)
+    train_dataset = DotaMultiTaskDataset(train_matches, num_heroes=num_heroes)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=10,pin_memory=True)
     
+    val_dataset = DotaMultiTaskDataset(val_matches, num_heroes=num_heroes)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=10,pin_memory=True)
     # 3. 初始化模型、损失函数、优化器
     model = DotaMultiTaskTransformer(num_heroes=num_heroes, embed_dim=64).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=4e-4)
@@ -214,7 +220,7 @@ def run_train():
         total_win_loss = 0
         total_mask_loss = 0
         
-        for batch_idx, (masked_seq, side_ids, target_hero_labels, win_label) in enumerate(dataloader):
+        for batch_idx, (masked_seq, side_ids, target_hero_labels, win_label) in enumerate(train_dataloader):
             # 将数据推入 GPU
             masked_seq = masked_seq.to(device)
             side_ids = side_ids.to(device)
@@ -249,20 +255,48 @@ def run_train():
             total_win_loss += loss_win.item()
             total_mask_loss += raw_mask_loss.item()
             
-        current_avg_loss = total_epoch_loss / len(dataloader)        
-        print(f"--- Epoch {epoch} End | Avg Loss: {total_epoch_loss / len(dataloader):.4f} (Win: {total_win_loss / len(dataloader):.4f}, Mask: {total_mask_loss / len(dataloader):.4f}) ---")
-        if current_avg_loss < best_loss:
-            best_loss = current_avg_loss
-            patience_counter = 0  # 只要打破记录，计数器直接清零
-            torch.save(model.state_dict(), "dota_bert_best.pt")
-            print("发现更低 Loss，已保存 Best Model!")
+        current_avg_loss = total_epoch_loss / len(train_dataloader)        
+        print(f"--- Epoch {epoch} End | Avg Loss: {current_avg_loss:.4f} (Win: {total_win_loss / len(train_dataloader):.4f}, Mask: {total_mask_loss / len(train_dataloader):.4f}) ---")
+        model.eval()
+        val_win_correct = 0
+        val_total = 0
+        with torch.no_grad():
+            for m_seq, s_ids, t_labels, win_label in val_loader:
+                m_seq, s_ids, win_label = m_seq.to(device), s_ids.to(device), win_label.to(device)
+                _, win_logits = model(m_seq, s_ids)
+                
+                # 算胜率准确率 (Win Accuracy)
+                preds = (torch.sigmoid(win_logits).squeeze() > 0.5).float()
+                val_win_correct += (preds == win_label.squeeze()).sum().item()
+                val_total += win_label.size(0)
+
+        val_acc = val_win_correct / val_total
+        print(f"Validation Win Accuracy: {val_acc:.4f}")
+        if epoch <10:
+            continue
+        elif val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), "models/dota_bert_best_acc.pt")
+            print("发现更高 Win Accuracy，已保存 Best Model!")
         else:
             patience_counter += 1
-            print(f"Loss 未下降，Patience 积累: {patience_counter} / {patience}")
+            print(f"Win Accuracy 未提升，Patience 积累: {patience_counter} / {patience}")
             
             if patience_counter >= patience:
-                print(f"连续 {patience} 个 Epoch Loss 未创新低，触发 Early Stopping 提前结束训练。")
-                break 
+                print(f"连续 {patience} 个 Epoch Win Accuracy 未提升，触发 Early Stopping 提前结束训练。")
+                break
+        # if current_avg_loss < best_loss:
+        #     best_loss = current_avg_loss
+        #     patience_counter = 0  # 只要打破记录，计数器直接清零
+        #     torch.save(model.state_dict(), "dota_bert_best.pt")
+        #     print("发现更低 Loss，已保存 Best Model!")
+        # else:
+        #     patience_counter += 1
+        #     print(f"Loss 未下降，Patience 积累: {patience_counter} / {patience}")
+            
+        #     if patience_counter >= patience:
+        #         print(f"连续 {patience} 个 Epoch Loss 未创新低，触发 Early Stopping 提前结束训练。")
+        #         break 
 
 if __name__ == "__main__":
     run_train()

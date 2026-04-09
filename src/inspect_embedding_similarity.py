@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn.functional as F
 
-from transformer import DotaMultiTaskTransformer
+from dota_transformer import DotaMultiTaskTransformer
 
 
 def load_id_to_name(path: Path) -> Dict[int, str]:
@@ -89,11 +89,11 @@ def topk_similar(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inspect hero embedding similarity by hero id")
-    parser.add_argument("--embedding", type=Path, default=Path("hero_embedding.pt"))
+    parser.add_argument("--embedding", type=Path, default=Path("models/hero_embedding.pt"))
     parser.add_argument("--dota-bert", type=Path, default=None, help="optional dota_bert.pt path")
     parser.add_argument("--num-heroes", type=int, default=145)
     parser.add_argument("--embed-dim", type=int, default=64)
-    parser.add_argument("--hero-id-to-name", type=Path, default=Path("hero_id_to_name.json"))
+    parser.add_argument("--hero-id-to-name", type=Path, default=Path("data/hero_id_to_name.json"))
     parser.add_argument("--hero-id", type=int, required=True)
     parser.add_argument("--topk", type=int, default=10)
     return parser.parse_args()
