@@ -318,7 +318,7 @@ class TransformerInference(BaseInference):
                 temp_hero_ids[0, i] = 0 # 模拟该位置英雄消失 (置为 0)
                 
                 # 重新计算胜率
-                new_prob, _ = self.engine.forward_with_attn(temp_hero_ids, side_ids)
+                new_prob, _ ,_ = self.engine.forward_with_attn(temp_hero_ids, side_ids)
                 delta = new_prob.item() - base_prob
                 deltas.append(delta)
 
