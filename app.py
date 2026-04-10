@@ -9,7 +9,7 @@ import plotly.express as px
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = ROOT_DIR / "data"
-MODELS_DIR = ROOT_DIR / "models"
+MODELS_DIR = ROOT_DIR / "models" / "final"
 
 TRANSLATIONS = {
     "zh": {
@@ -110,6 +110,7 @@ def t(key: str, **kwargs) -> str:
 
 def list_model_files(suffixes=None):
     if not MODELS_DIR.exists():
+        st.warning(f"Model folder not found: {MODELS_DIR}")
         return []
 
     files = [p.name for p in MODELS_DIR.iterdir() if p.is_file()]

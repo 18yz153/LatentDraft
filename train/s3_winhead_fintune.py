@@ -10,10 +10,10 @@ if str(ROOT_DIR) not in sys.path:
 from src.utils import get_number_of_heroes
 from src.model import DotaMultiTaskTransformer
 import torch.nn as nn
-from src.dataset import 
-from src.train import CMTrainer
+from src.dataset import build_s3_dataloader
+from src.train import S3WinHeadTrainer
 
-def finetune_role_head():
+def train_value_network():
     # 1. 初始化模型并加载预训练底座
     num_heroes = get_number_of_heroes(Path("data/hero_id_to_name.json"))
     embed_dim = 64
@@ -22,7 +22,7 @@ def finetune_role_head():
     model = DotaMultiTaskTransformer(num_heroes=num_heroes, embed_dim=embed_dim).to(device)
     
     # S3 从 S2 的 best role 模型继续训练
-    state_dict = torch.load("models/stage2_role_best.pt", map_location=device)
+    state_dict = torch.load("models/checkpoint/stage2_role_best.pt", map_location=device)
     
     # 3. 再加载到模型中
     model.load_state_dict(state_dict, strict=False)
@@ -48,8 +48,9 @@ def finetune_role_head():
         param.requires_grad = True
         
     # 3. 准备 CM DataLoader（match_role.json）
-    train_loader, val_loader = (
-        data_path=Path("data/match_role.json"),
+    train_loader, val_loader = build_s3_dataloader(
+        match_role_path=Path("data/match_role.json"),
+        allmatch_path=Path("data/allmatch.json"),
         batch_size=1024,
         shuffle=True,
         num_workers=4,
@@ -65,53 +66,52 @@ def finetune_role_head():
         {'params': model.side_emb.parameters(), 'lr': 1e-6},
         {'params': model.mask_head.parameters(), 'lr': 1e-5},
     ])
-    criterion_role = nn.CrossEntropyLoss()
+    criterion_mask = nn.CrossEntropyLoss(ignore_index=-100) 
     criterion_win = nn.BCEWithLogitsLoss()
 
-    trainer = CMTrainer(
+    trainer = S3WinHeadTrainer(
         model=model,
         optimizer=optimizer,
         device=device,
         save_path="models",
     )
 
-    best_val_role_acc = 0.0
-    patience = 5  # 如果连续 5 个 Epoch 验证集 Role Acc 不涨，就停止
+    best_val_auc = 0.5  # AUC 的及格线是 0.5 (盲猜)
+    patience = 5        # 如果连续 5 个 Epoch AUC 不涨，就停止
     patience_counter = 0
-    max_epochs = 50 # 把上限设高，反正有早停拦着
+    max_epochs = 50
 
     for epoch in range(max_epochs):
-        # 1. 训练阶段
-        train_loss, train_role_acc = trainer.train_one_epoch(
-            train_loader, criterion_role, criterion_win
+        # 1. 训练阶段 (S3Trainer 返回 3 个值：总Loss，Win Loss，Mask Loss)
+        train_loss, train_win_loss, train_mask_loss = trainer.train_one_epoch(
+            train_loader, criterion_mask, criterion_win
         )
         
-        # 2. 验证阶段 (你需要确保 CMTrainer 里有一个 evaluate 方法)
-        # 验证阶段不要计算梯度：with torch.no_grad():
-        val_loss, val_role_acc,val_acc= trainer.evaluate(
-            val_loader, criterion_role, criterion_win
+        # 2. 验证阶段 (S3Trainer 返回 2 个值：总Loss，Val AUC)
+        val_loss, val_auc = trainer.evaluate(
+            val_loader, criterion_mask, criterion_win
         )
         
+        # 打印清爽的日志
         print(f"Epoch {epoch} | "
-              f"Train Loss: {train_loss:.4f}, Train Acc: {train_role_acc:.2%} | "
-              f"Val Loss: {val_loss:.4f}, Val Acc: {val_role_acc:.2%}")
+              f"Train Loss: {train_loss:.4f} (Win: {train_win_loss:.4f}, Mask: {train_mask_loss:.4f}) | "
+              f"Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f}")
 
-        # 3. 判断是否是最好的一代，保存模型
-        if val_role_acc > best_val_role_acc:
-            best_val_role_acc = val_role_acc
+        # 3. 早停逻辑：现在全看 AUC 脸色！
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
             patience_counter = 0 # 重置计数器
-            torch.save(model.state_dict(), "models/stage2_role_best.pt")
-            print("  --> [New Best Model Saved!]")
+            # 存下最牛逼的价值网络
+            torch.save(model.state_dict(), "models/stage3_value_network_best.pt")
+            print("  --> [New Best Value Network Saved!]")
         else:
             patience_counter += 1
             print(f"  --> [Patience: {patience_counter}/{patience}]")
             
         # 4. 早停触发
         if patience_counter >= patience:
-            print(f"Early stopping triggered! Validation Role Acc hasn't improved for {patience} epochs.")
+            print(f"Early stopping triggered! Validation AUC hasn't improved for {patience} epochs.")
             break
 
-    print("Fine-tuning complete. Best model is saved as stage2_role_best.pt")
-
 if __name__ == "__main__":
-    finetune_role_head()
+    train_value_network()

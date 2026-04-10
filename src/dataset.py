@@ -6,10 +6,9 @@ from torch.utils.data import Dataset, DataLoader, random_split
 
 
 class DotaMultiTaskDataset(Dataset):
-    def __init__(self, matches, roles, num_heroes, is_train=True):
+    def __init__(self, matches, roles, is_train=True):
         self.matches = matches # load_matches 处理好的 [winner, loser] 列表
         self.roles = roles # load_roles 处理好的角色列表
-        self.num_heroes = num_heroes
         self.mask_token_id = 0
         self.ignore_index = -100
         self.is_train = is_train
@@ -92,6 +91,126 @@ class DotaMultiTaskDataset(Dataset):
         )
     
 
+
+def build_s3_dataset(
+    match_role_path: Path = Path("data/match_role.json"),
+    allmatch_path: Path = Path("data/allmatch.json"),
+    is_train: bool = True,
+    prefer_match_role: bool = True,
+) -> DotaMultiTaskDataset:
+    """
+    读取 match_role + allmatch，合并成统一样本后构造 DotaMultiTaskDataset。
+    不改 DotaCMDataset，仅用于 S3 阶段快速实验。
+    """
+    with open(match_role_path, "r", encoding="utf-8") as f:
+        role_rows = json.load(f)
+    with open(allmatch_path, "r", encoding="utf-8") as f:
+        all_rows = json.load(f)
+
+    role_by_match_id = {}
+    for r in role_rows:
+        try:
+            mid = int(r["match_id"])
+            role_by_match_id[mid] = {
+                "match_id": mid,
+                "radiant_team": [int(x) for x in r["rad_hero_ids"]],
+                "dire_team": [int(x) for x in r["dire_hero_ids"]],
+                "rad_positions": [int(x) for x in r.get("rad_positions", [0, 0, 0, 0, 0])],
+                "dire_positions": [int(x) for x in r.get("dire_positions", [0, 0, 0, 0, 0])],
+                "radiant_win": bool(int(float(r.get("rad_winlabel", 0)))),
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    merged_matches = []
+    seen = set()
+
+    for m in all_rows:
+        try:
+            mid = int(m["match_id"])
+            rad = [int(x) for x in m["radiant_team"]]
+            dire = [int(x) for x in m["dire_team"]]
+            if len(rad) != 5 or len(dire) != 5:
+                continue
+
+            if prefer_match_role and mid in role_by_match_id:
+                merged = role_by_match_id[mid]
+            else:
+                role_ref = role_by_match_id.get(mid)
+                merged = {
+                    "match_id": mid,
+                    "radiant_team": rad,
+                    "dire_team": dire,
+                    "rad_positions": role_ref["rad_positions"] if role_ref else [0, 0, 0, 0, 0],
+                    "dire_positions": role_ref["dire_positions"] if role_ref else [0, 0, 0, 0, 0],
+                    "radiant_win": bool(m.get("radiant_win", False)),
+                }
+
+            merged_matches.append(merged)
+            seen.add(mid)
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    for mid, row in role_by_match_id.items():
+        if mid not in seen:
+            if len(row["radiant_team"]) == 5 and len(row["dire_team"]) == 5:
+                merged_matches.append(row)
+
+    print(
+        f"S3 merge done: allmatch={len(all_rows)}, match_role={len(role_rows)}, merged={len(merged_matches)}"
+    )
+
+    # roles 参数当前在 Dataset 内部未使用，传占位列表保证接口稳定。
+    roles_placeholder = [None] * len(merged_matches)
+    return DotaMultiTaskDataset(
+        matches=merged_matches,
+        roles=roles_placeholder,
+        is_train=is_train,
+    )
+
+
+def build_s3_dataloader(
+    match_role_path: Path = Path("data/match_role.json"),
+    allmatch_path: Path = Path("data/allmatch.json"),
+    batch_size: int = 1024,
+    shuffle: bool = True,
+    num_workers: int = 4,
+    val_ratio: float = 0.1,
+    prefer_match_role: bool = True,
+):
+    dataset = build_s3_dataset(
+        match_role_path=match_role_path,
+        allmatch_path=allmatch_path,
+        is_train=True,
+        prefer_match_role=prefer_match_role,
+    )
+
+    total_size = len(dataset)
+    val_size = int(total_size * val_ratio)
+    train_size = total_size - val_size
+
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        persistent_workers=True,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        persistent_workers=True,
+        pin_memory=True,
+    )
+
+    print(f"S3 Dataset Split: {train_size} Train | {val_size} Valid")
+    return train_loader, val_loader
 
 class DotaCMDataset(Dataset):
     """CM 阶段数据：默认读取 match_role.json，返回 role+win 联合训练所需张量。"""

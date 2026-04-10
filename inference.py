@@ -8,56 +8,34 @@ from collections import OrderedDict
 
 import torch.nn as nn
 import torch.nn.functional as F
+from src.model import DotaMultiTaskTransformer
 
-class TransformerInferenceEngine(nn.Module):
+class TransformerInferenceEngine(DotaMultiTaskTransformer):
     def __init__(self, model_path, num_heroes, embed_dim=64, nhead=8, num_layers=3):
-        super().__init__()
-        # 必须与训练时的参数完全一致，否则 load_state_dict 会报错
-        self.hero_emb = nn.Embedding(num_heroes + 1, embed_dim, padding_idx=0)
-        self.side_emb = nn.Embedding(2, embed_dim)
-
-        self.win_token = nn.Parameter(torch.randn(1, 1, embed_dim))
-
-        # 重点：手动定义 layers 列表。PyTorch 会把训练好的 
-        # self.transformer.layers.0 ... 自动映射到这里的 self.layers.0
-        self.layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(d_model=embed_dim, nhead=nhead, batch_first=True)
-            for _ in range(num_layers)
-        ])
-
-        self.mask_head = nn.Linear(embed_dim, num_heroes + 1)
-        self.win_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.ReLU(),
-            nn.Linear(embed_dim, 1)
-        )
-        self.role_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.ReLU(),
-            nn.Linear(embed_dim, 5) # 输出 5 个位置的 logits
+        # 1. 直接调用父类的 __init__，构建原汁原味的模型结构！
+        super().__init__(
+            num_heroes=num_heroes, 
+            embed_dim=embed_dim, 
+            nhead=nhead, 
+            num_layers=num_layers
         )
 
-        # 加载 4070 炼出的丹
+        # 2. 完美加载：因为结构 100% 一致，不需要再魔改 Key 了，直接 load！
         state_dict = torch.load(model_path, map_location="cpu")
-        
-        # 核心技巧：如果训练时用了 nn.TransformerEncoder，Key 会带有 "transformer." 前缀
-        # 我们需要处理一下 Key 映射到 self.layers
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            if k.startswith("transformer.layers."):
-                new_state_dict[k.replace("transformer.layers.", "layers.")] = v
-            else:
-                new_state_dict[k] = v
-        
-        self.load_state_dict(new_state_dict)
+        self.load_state_dict(state_dict)
         self.eval()
 
-    def forward_with_attn(self, hero_ids, side_ids, mask_pos=None):
+    def forward_with_attn(self, hero_ids, side_ids, role_labels=None, mask_pos=None):
         """特殊的 forward，返回胜率的同时返回最后一层 attention"""
         batch_size = hero_ids.shape[0]
         x = self.hero_emb(hero_ids) + self.side_emb(side_ids)
+        
+        # 🌟 修复 1：完美复刻 win_token 的 side_emb (保证特征分布一致)
         w_token = self.win_token.expand(batch_size, -1, -1)
-        x = torch.cat([w_token, x], dim=1)
+        w_side_idx = torch.zeros((batch_size, 1), dtype=torch.long, device=hero_ids.device)
+        w_token_with_side = w_token + self.side_emb(w_side_idx)
+        x = torch.cat([w_token_with_side, x], dim=1)
+        
         win_mask = torch.zeros((batch_size, 1), dtype=torch.bool, device=x.device)
         hero_mask = (hero_ids == 0)
         full_mask = torch.cat([win_mask, hero_mask], dim=1)
@@ -65,43 +43,72 @@ class TransformerInferenceEngine(nn.Module):
         features = x
         last_weights = None
         
-        for i, layer in enumerate(self.layers):
-            # 手动执行 MultiheadAttention 并强行索要 weights
-            # 这一步会跳过训练时的加速路径，但推理 10 个英雄完全没延迟
+        for i, layer in enumerate(self.transformer.layers):
             attn_output, weights = layer.self_attn(
                 features, features, features, 
                 key_padding_mask=full_mask,
                 need_weights=True 
             )
-            
             features = layer.norm1(features + layer.dropout1(attn_output))
             ff_output = layer.linear2(layer.dropout(F.relu(layer.linear1(features))))
             features = layer.norm2(features + layer.dropout2(ff_output))
             
-            if i == len(self.layers) - 1:
-                # 此时 weights 的形状是 [Batch, 11, 11]
-                # [0, :] 这一行代表了 win_token 对全场 10 个英雄的关注度
+            if i == len(self.transformer.layers) - 1:
                 last_weights = weights 
 
-        mask_logits = None
-        all_hero_feats = features[:, 1:, :]
-        if mask_pos is not None:
-            # mask_pos 是 0-9，对应 features 里的索引是 1-10
-            # 我们可以通过 gather 拿到对应的 token 特征
-            # indices 形状为 [Batch, 1, Hidden_Dim]
-            idx = (mask_pos + 1).view(batch_size, 1, 1).expand(-1, -1, features.size(-1))
-            target_feat = features.gather(1, idx).squeeze(1) # [Batch, Hidden_Dim]
-            mask_logits = self.mask_head(target_feat) # [Batch, Num_Heroes + 1]
-        else:
-            # 如果没有指定特定位置，通常返回全场的 mask 预测（用于展示建议）
-            # 取除了 win_token 以外的所有位置 [Batch, 10, Hidden_Dim]
-            mask_logits = self.mask_head(all_hero_feats) # [Batch, 10, Num_Heroes + 1]
-        # 4. 【核心修改】：只取第 0 个位置的特征给 win_head
-        global_feat = features[:, 0, :] 
-        win_logits = self.win_head(global_feat)
-        role_logits = self.role_head(all_hero_feats)
+        # 剥离特征
+        hero_features = features[:, 1:, :]
+        global_features = features[:, 0, :]
         
-        return torch.sigmoid(win_logits),mask_logits,role_logits, last_weights
+        # 获取基础 Logits
+        role_logits = self.role_head(hero_features)
+        
+        if mask_pos is not None:
+            idx = (mask_pos + 1).view(batch_size, 1, 1).expand(-1, -1, features.size(-1))
+            target_feat = features.gather(1, idx).squeeze(1)
+            mask_logits = self.mask_head(target_feat)
+        else:
+            mask_logits = self.mask_head(hero_features)
+
+        # 🌟 修复 2：完美复刻 Soft-Slotting (物理入座与冲突报警器)
+        if role_labels is None:
+            role_labels = torch.zeros((batch_size, 10), dtype=torch.long, device=hero_ids.device)
+            
+        role_probs = F.softmax(role_logits, dim=-1) 
+        
+        hard_role_probs = torch.zeros_like(role_probs)
+        valid_mask = (role_labels > 0) 
+        safe_indices = torch.clamp(role_labels - 1, min=0)
+        hard_role_probs.scatter_(2, safe_indices.unsqueeze(-1), 1.0)
+        
+        valid_mask_expanded = valid_mask.unsqueeze(-1)
+        final_role_features = torch.where(valid_mask_expanded, hard_role_probs, role_probs)
+
+        # 阵营分割与矩阵乘法 (bmm)
+        rad_features = hero_features[:, :5, :] 
+        dire_features = hero_features[:, 5:, :] 
+        rad_roles = final_role_features[:, :5, :] 
+        dire_roles = final_role_features[:, 5:, :] 
+        
+        rad_slots = torch.bmm(rad_roles.transpose(1, 2), rad_features) 
+        dire_slots = torch.bmm(dire_roles.transpose(1, 2), dire_features)
+
+        structured_features = torch.cat([rad_slots, dire_slots], dim=1).view(batch_size, -1)
+        rad_counts = rad_roles.sum(dim=1) 
+        dire_counts = dire_roles.sum(dim=1) 
+        occupancy = torch.cat([rad_counts, dire_counts], dim=-1) 
+        
+        # 拼接 714 维终极特征
+        combined_features = torch.cat([
+            global_features,     # [Batch, 64] 大局观
+            structured_features, # [Batch, 640] 1-5号位对阵图
+            occupancy            # [Batch, 10] 冲突/空位报警器
+        ], dim=-1)
+        
+        # 喂给 WinHead
+        win_logits = self.win_head(combined_features)
+        
+        return torch.sigmoid(win_logits), mask_logits, role_logits, last_weights
 
 
 class BaseInference(ABC):
@@ -345,7 +352,7 @@ class TransformerInference(BaseInference):
         # 2. 运行模型拿到全量数据 [1, 11, 11]
         # 使用 torch.no_grad() 确保推理时不计算梯度，减少内存占用
         with torch.no_grad():
-            win_prob, _, _, last_weights = self.engine.forward_with_attn(hero_ids, side_ids)
+            win_prob, _, role_, last_weights = self.engine.forward_with_attn(hero_ids, side_ids)
             
             # 【核心修正】：增加 .detach() 以剥离梯度
             attn_matrix = last_weights[0].detach().cpu().numpy() # [11, 11]
