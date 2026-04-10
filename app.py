@@ -26,8 +26,8 @@ TRANSLATIONS = {
         "enemy": "敌方",
         "empty": "(空)",
         "delete": "删除",
-        "hero_filter": "筛选英雄（支持中文/英文）",
-        "hero_filter_placeholder": "例如：p、spirit、斧",
+        "hero_filter": "筛选英雄（英文）",
+        "hero_filter_placeholder": "例如：p、spirit，axe",
         "match_mode": "匹配方式",
         "prefix": "前缀",
         "contains": "包含",
@@ -69,7 +69,7 @@ TRANSLATIONS = {
         "enemy": "Enemy",
         "empty": "(Empty)",
         "delete": "Remove",
-        "hero_filter": "Filter heroes (Chinese/English)",
+        "hero_filter": "Filter heroes",
         "hero_filter_placeholder": "e.g. p, spirit, axe",
         "match_mode": "Match Mode",
         "prefix": "Prefix",
@@ -169,43 +169,8 @@ if "ally_team" not in st.session_state:
     st.session_state.ally_team = []
 if "enemy_team" not in st.session_state:
     st.session_state.enemy_team = []
-
-
-with st.expander(t("config_expander"), expanded=False):
-    # 横向排列三个设置项，极限压缩垂直空间
-    cfg_cols = st.columns(3)
-    xgb_files = list_model_files({".model", ".json", ".ubj", ".bin"})
-    torch_files = list_model_files({".pt", ".pth"})
-    
-    with cfg_cols[0]:
-        st.session_state.ui_lang = st.selectbox(t("language"), ["中文", "English"], index=0 if st.session_state.ui_lang == "中文" else 1)
-        LANG = "zh" if st.session_state.ui_lang == "中文" else "en"
-        m_type = st.selectbox(t("algo"), ["Transformer", "XGBoost"])
-    
-    with cfg_cols[1]:
-        if m_type == "XGBoost":
-            xgb_options = xgb_files if xgb_files else ["xgb_bp.model"]
-            xgb_default = xgb_options.index("xgb_bp.model") if "xgb_bp.model" in xgb_options else 0
-            selected_xgb = st.selectbox(t("xgb_file"), xgb_options, index=xgb_default)
-            m_path = str(MODELS_DIR / selected_xgb)
-        else:
-            transformer_options = torch_files if torch_files else ["dota_bert.pt"]
-            transformer_default = transformer_options.index("dota_bert.pt") if "dota_bert.pt" in transformer_options else 0
-            selected_transformer = st.selectbox(t("transformer_file"), transformer_options, index=transformer_default)
-            m_path = str(MODELS_DIR / selected_transformer)
-            
-    with cfg_cols[2]:
-        if m_type == "XGBoost":
-            emb_options = torch_files if torch_files else ["hero_embedding.pt"]
-            emb_default = emb_options.index("hero_embedding.pt") if "hero_embedding.pt" in emb_options else 0
-            selected_emb = st.selectbox(t("emb_file"), emb_options, index=emb_default)
-            e_path = str(MODELS_DIR / selected_emb)
-        else:
-            e_path = None
-            st.caption(t("transformer_no_emb"))
-hero_name_path = str(DATA_DIR / "hero_id_to_name.json")
-# 加载引擎
-engine, hero_id_to_name, valid_hero_ids = load_engine(m_type, m_path, e_path, hero_name_path)
+if "explanation_cache" not in st.session_state:
+    st.session_state.explanation_cache = {}
 
 
 def add_hero(hero_id: int, side: str) -> None:
@@ -268,7 +233,57 @@ left_col, right_col = st.columns([2, 1])
 
 
 with left_col:
-    winrate_placeholder = st.empty()  # 用于后续动态更新胜率显示
+    top_row = st.columns([3.2, 1.0])
+    with top_row[0]:
+        with st.expander(t("config_expander"), expanded=False):
+            cfg_cols = st.columns([1.1, 1.0, 1.6, 1.6])
+            xgb_files = list_model_files({".model", ".json", ".ubj", ".bin"})
+            torch_files = list_model_files({".pt", ".pth"})
+
+            with cfg_cols[0]:
+                st.session_state.ui_lang = st.selectbox(
+                    t("language"),
+                    ["中文", "English"],
+                    index=0 if st.session_state.ui_lang == "中文" else 1,
+                    label_visibility="collapsed",
+                )
+                st.caption(t("language"))
+                LANG = "zh" if st.session_state.ui_lang == "中文" else "en"
+
+            with cfg_cols[1]:
+                m_type = st.selectbox(t("algo"), ["Transformer", "XGBoost"], label_visibility="collapsed")
+                st.caption(t("algo"))
+
+            with cfg_cols[2]:
+                if m_type == "XGBoost":
+                    xgb_options = xgb_files if xgb_files else ["xgb_bp.model"]
+                    xgb_default = xgb_options.index("xgb_bp.model") if "xgb_bp.model" in xgb_options else 0
+                    selected_xgb = st.selectbox(t("xgb_file"), xgb_options, index=xgb_default, label_visibility="collapsed")
+                    m_path = str(MODELS_DIR / selected_xgb)
+                    st.caption(t("xgb_file"))
+                else:
+                    transformer_options = torch_files if torch_files else ["dota_bert.pt"]
+                    transformer_default = transformer_options.index("dota_bert.pt") if "dota_bert.pt" in transformer_options else 0
+                    selected_transformer = st.selectbox(t("transformer_file"), transformer_options, index=transformer_default, label_visibility="collapsed")
+                    m_path = str(MODELS_DIR / selected_transformer)
+                    st.caption(t("transformer_file"))
+
+            with cfg_cols[3]:
+                if m_type == "XGBoost":
+                    emb_options = torch_files if torch_files else ["hero_embedding.pt"]
+                    emb_default = emb_options.index("hero_embedding.pt") if "hero_embedding.pt" in emb_options else 0
+                    selected_emb = st.selectbox(t("emb_file"), emb_options, index=emb_default, label_visibility="collapsed")
+                    e_path = str(MODELS_DIR / selected_emb)
+                    st.caption(t("emb_file"))
+                else:
+                    e_path = None
+                    st.caption(t("transformer_no_emb"))
+
+            hero_name_path = str(DATA_DIR / "hero_id_to_name.json")
+            engine, hero_id_to_name, valid_hero_ids = load_engine(m_type, m_path, e_path, hero_name_path)
+
+    with top_row[1]:
+        winrate_placeholder = st.empty()  # 用于动态更新胜率显示
 
     st.subheader(t("selected_lineup"))
     render_selected_team(t("ally"), st.session_state.ally_team, "己方", "rm_ally")
@@ -312,17 +327,31 @@ with right_col:
     if not st.session_state.ally_team and not st.session_state.enemy_team:
         st.info(t("select_hero_hint"))
     else:
-        pick_results = engine.recommend(
-            current_ally=st.session_state.ally_team,
-            current_enemy=st.session_state.enemy_team,
-            valid_hero_ids=valid_hero_ids,
-            mode="pick"
-        )
-        ban_results = engine.recommend(
-            current_ally=st.session_state.ally_team,
-            current_enemy=st.session_state.enemy_team,
-            valid_hero_ids=valid_hero_ids,
-            mode="ban"
+        if len(st.session_state.ally_team) < 5:
+            pick_results = engine.recommend(
+                current_ally=st.session_state.ally_team,
+                current_enemy=st.session_state.enemy_team,
+                valid_hero_ids=valid_hero_ids,
+                mode="pick"
+            )
+        else:
+            pick_results = []
+
+        if len(st.session_state.enemy_team) < 5:
+            ban_results = engine.recommend(
+                current_ally=st.session_state.ally_team,
+                current_enemy=st.session_state.enemy_team,
+                valid_hero_ids=valid_hero_ids,
+                mode="ban"
+            )
+        else:
+            ban_results = []
+
+        lineup_cache_key = (
+            m_type,
+            m_path,
+            tuple(st.session_state.ally_team),
+            tuple(st.session_state.enemy_team),
         )
 
         st.subheader(t("reco_pick"))
@@ -338,11 +367,16 @@ with right_col:
                 with cols[1]:
                     st.markdown(f"**{i+1}. {name}** ({t('pred_score')}: `{float(score):.2f}`)")
                     if i < 5 and (st.session_state.ally_team or st.session_state.enemy_team):
-                        enemy_bonds, ally_bonds = engine.get_explanation(
-                            hero_id, 
-                            st.session_state.ally_team, 
-                            st.session_state.enemy_team
-                        )
+                        explain_key = lineup_cache_key + (int(hero_id),)
+                        if explain_key in st.session_state.explanation_cache:
+                            enemy_bonds, ally_bonds = st.session_state.explanation_cache[explain_key]
+                        else:
+                            enemy_bonds, ally_bonds = engine.get_explanation(
+                                hero_id,
+                                st.session_state.ally_team,
+                                st.session_state.enemy_team,
+                            )
+                            st.session_state.explanation_cache[explain_key] = (enemy_bonds, ally_bonds)
                         reasons = []
                         for e_id, e_val, e_delta in enemy_bonds:
                             e_name = hero_id_to_name.get(e_id, t("unknown"))

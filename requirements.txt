@@ -1,6 +1,10 @@
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+torch
+pandas
+numpy
+plotly
 streamlit
 xgboost
-torch
-numpy
-pandas
-plotly
+scikit-learn
