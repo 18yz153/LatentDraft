@@ -12,3 +12,4 @@ venv/
 .env
 models/abondoned/
 models/checkpoint/
+.streamlit/

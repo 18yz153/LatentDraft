@@ -1,0 +1,100 @@
+
+
+
+# LatentDraft
+
+## An Industrial-Grade Two-Stage Recommendation & Win-Prediction Framework for Dota 2
+
+LatentDraft is an open-source Dota 2 lineup modeling and recommendation framework. It is not just a win-rate predictor, but a two-stage cascade recommendation system designed to meet industrial standards (Match & Rank). This project deeply explores feature engineering in asymmetric zero-sum game environments, addressing real-world deep learning challenges such as representation collapse, shortcut learning, and multi-task objective conflicts. Whether you are a high-level player seeking advanced BP strategies or an AI engineer researching complex recommender architectures, LatentDraft provides a valuable research foundation and a production-ready codebase.
+
+## Neural Architecture: The DotaMultiTaskTransformer
+
+At the heart of LatentDraft is a custom Multi-Task Transformer designed to capture the complex synergies and dynamic role assignments within a 10-player Dota 2 draft. Unlike standard sequence models, it features a unique Differential Role-Routing mechanism:
+
+- **Tokenization & Global State:** The input sequence consists of Hero ID and Faction (Radiant/Dire) embeddings, prepended with a learnable [WIN] token (similar to a CLS token) that captures the macroscopic state of the draft.
+- **Transformer Encoder Backbone:** A deep self-attention mechanism processes the sequence, allowing the network to natively learn micro-interactions (e.g., lane matchups) and macro-interactions (e.g., global teamfight combos).
+- **Dynamic Role Soft-Routing (Core Innovation):** Instead of treating farm priority (Positions 1-5) as a static input, the model dynamically infers it:
+  - The RoleHead predicts a soft probability distribution of positions for each hero.
+  - A fusion mechanism intelligently blends known positions (hard one-hot labels) with predicted positions (soft labels) for missing or masked heroes.
+  - Using Batch Matrix Multiplication (BMM), the model physically routes the unordered hero features into a strict 10-slot matrix (Radiant Pos 1-5 vs. Dire Pos 1-5), forcing the network to evaluate the game through a structured positional lens.
+- **Occupancy & Conflict Detection:** The model calculates an occupancy tensor by summing role distributions. This acts as an explicit "conflict alarm," feeding directly into the WinHead to penalize drafts with overlapping roles (e.g., two Position 1 hard carries).
+- **Multi-Task Heads:**
+  - MaskHead: Predicts missing heroes over the 130+ hero vocabulary for recall generation.
+  - WinHead: The ultimate judge. It concatenates the [WIN] global feature, the 10-Slot Matrix, and the Occupancy Alarm into a deep MLP to output highly calibrated win-rate logits for downstream ranking.
+
+## System Pipeline Highlights
+
+LatentDraft avoids simplistic "end-to-end black box" stacking, instead adopting a cascade architecture inspired by large-scale industry recommendation systems, perfectly decoupling rationality and utility:
+
+### Two-Stage Decoupled Pipeline (Recall and Rerank Separation)
+
+- **Stage 1 (MaskHead - Value Neutral):** Based on Masked Language Modeling (MLM), learns Dota 2 lineup knowledge via fill-in-the-blank tasks, providing a safe, compliant, high-quality candidate pool (Top-30 Recall).
+- **Stage 2 (WinHead - Utility Maximization):** Fills recall candidates into real endgame scenarios, creating parallel universes. A highly sensitive value network conducts $1 \text{ vs } 15$ win-rate ranking and reranking.
+
+### Hybrid Objective Optimization (Multi-Objective Joint Training)
+
+Combines InfoNCE (Listwise Ranking) and BCE (Pointwise Calibration) to ensure both sharpness at the top of the recommendation list (Hit@K) and absolute win-rate calibration at the base.
+
+### Offline Context-Aware Hard Negative Mining
+
+Abandons static embedding distance for negative mining, which often leads to representation collapse. Instead, uses a frozen MaskHead for offline inference, generating a feature bank with 70% context-aware hard negatives and 30% global easy negatives, maximizing GPU utilization for ranking learning.
+
+### Zero-Leakage Perspective Alignment
+
+At the dataset layer, preserves the true physical side distribution (Radiant/Dire), preventing shortcut learning such as "always guess left." Perspective alignment is achieved purely mathematically at the loss computation layer via gradient sign mirroring.
+
+### Mega-Batch Parallel Inference
+
+During rerank and evaluation, tensor flattening enables parallel simulation of up to 16 or 30 endgame scenarios. One forward pass yields both BCE-calibrated scores and InfoNCE ranking, exponentially accelerating training and inference.
+
+### Business-Aligned Evaluation
+
+LatentDraft discards academic metrics that detach from reality, utilizing strict, business-aligned evaluation metrics:
+
+- **Missing=1 One-Step Test:** Focuses on 9-vs-1 extreme BP scenarios, the ultimate test of micro-level recommendation and adversarial drafting.
+- **Mask Hit@30 (Recall):** Evaluates the lower bound of Stage 1's knowledge understanding.
+- **WinHead Hit@5 / Hit@10 (Rerank Accuracy):** Evaluates the upper bound of Stage 2's ability to find the absolute "meta answer" among top candidates.
+
+## Installation
+
+```bash
+git clone https://github.com/18yz153/LatentDraft.git
+cd LatentDraft
+pip install -r requirements.txt
+```
+
+## Quick Start
+
+1. **Pretrain the Base Model (MaskHead & Base WinRate):**
+
+   ```bash
+   python train/s1_maskhead_pretrain.py
+   ```
+
+2. **Offline Feature Materialization:**
+
+   ```bash
+   python scripts/rerankdataset.py \
+       --model-path models/final/stage1_best.pt \
+       --output-path data/rerank_s3_val.json \
+       --split val
+   ```
+
+3. **Fine-Tune the Reranker (WinHead Ranking):**
+
+   ```bash
+   python train/s3_winhead_fintune.py
+   ```
+
+## Repository Structure
+
+- `src/model.py`: Core network definitions (DotaMultiTaskTransformer, MaskHead, WinHead)
+- `src/dataset.py`: Optimized DataLoader, handles complex masking and physical side alignment
+- `scripts/rerankdataset.py`: Offline negative mining pipeline, the engineering core of the recommender system
+- `train/`: Multi-stage training scripts for full experiment reproduction
+
+## License & Acknowledgements
+
+MIT License
+
+Special thanks to the Dota 2 community and OPENDOTA for providing high-quality match data. This project is both a tribute to Dota 2's immense complexity and a deep engineering practice in modern AI recommender systems.

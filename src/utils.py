@@ -25,9 +25,18 @@ def load_embedding_payload(path: Path) -> Tuple[List[int], torch.Tensor]:
 
     raise ValueError("unknown embedding payload format")
 
+def get_all_hero_pools():
+    all_hero_pools = set()
+    with open('data/heroes.json', 'r', encoding='utf-8') as f:
+        raw = json.load(f)
+        for heroid in raw.keys():
+            hero_id = int(heroid)
+            all_hero_pools.add(hero_id)
 
-def load_hero_id_to_name(path: Path) -> Dict[int, str]:
-    with path.open("r", encoding="utf-8") as f:
+    return all_hero_pools
+
+def load_hero_id_to_name() -> Dict[int, str]:
+    with open('data/hero_id_to_name.json', "r", encoding="utf-8") as f:
         raw = json.load(f)
     return {int(k): str(v) for k, v in raw.items()}
 
@@ -35,6 +44,10 @@ def load_hero_id_to_url_name(path: Path) -> Dict[int, str]:
     with path.open("r", encoding="utf-8") as f:
         raw = json.load(f)
     return {int(k): str(v) for k, v in raw.items()}
-def get_number_of_heroes(path: Path) -> int:
-    load_hero_id_to_name(path)
-    return max(load_hero_id_to_name(path).keys())
+def get_number_of_heroes() -> int:
+    return max(load_hero_id_to_name().keys())
+
+def load_hero_static_json():
+    with open('data/heroes.json', 'r', encoding='utf-8') as f:
+        raw = json.load(f)
+    return {int(k): v for k, v in raw.items()}

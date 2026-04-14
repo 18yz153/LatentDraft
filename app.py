@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
-
+from turtle import mode
+import numpy as np
 import streamlit as st
 import xgboost as xgb
 from src.utils import load_embedding_payload, load_hero_id_to_name, load_hero_id_to_url_name
@@ -143,7 +144,7 @@ st.markdown(
 @st.cache_resource
 def load_engine(model_type, model_path, embedding_path, hero_name_path):
     # 通用数据加载
-    hero_id_to_name = load_hero_id_to_name(Path(hero_name_path))
+    hero_id_to_name = load_hero_id_to_name()
     num_heroes = max(hero_id_to_name.keys())
     if model_type == "XGBoost":
         hero_pool, emb_tensor = load_embedding_payload(Path(embedding_path))
@@ -229,6 +230,68 @@ def match_hero_name(hero_name: str, keyword: str, mode: str) -> bool:
     return key_l in name_l
 
 
+def build_inference_state(engine, m_type, m_path, ally_team, enemy_team, valid_hero_ids):
+    state = {
+        "pick_results": [],
+        "ban_results": [],
+        "lineup_cache_key": (m_type, m_path, tuple(ally_team), tuple(enemy_team)),
+        "pick_explanations": {},
+        "matrix": None,
+        "deltas": None,
+        "base_prob": None,
+        "matrix_error": None,
+    }
+
+    if not ally_team and not enemy_team:
+        return state
+
+    if len(ally_team) < 5:
+        state["pick_results"] = engine.recommend(
+            current_ally=ally_team,
+            current_enemy=enemy_team,
+            valid_hero_ids=valid_hero_ids,
+            mode="pick",
+        )
+
+    if len(enemy_team) < 5:
+        state["ban_results"] = engine.recommend(
+            current_ally=ally_team,
+            current_enemy=enemy_team,
+            valid_hero_ids=valid_hero_ids,
+            mode="ban",
+        )
+
+    if state["pick_results"] and (ally_team or enemy_team):
+        for i, (hero_id, _) in enumerate(state["pick_results"][:5]):
+            explain_key = state["lineup_cache_key"] + (int(hero_id),)
+            if explain_key in st.session_state.explanation_cache:
+                enemy_bonds, ally_bonds = st.session_state.explanation_cache[explain_key]
+            else:
+                enemy_bonds, ally_bonds = engine.get_explanation(
+                    hero_id,
+                    ally_team,
+                    enemy_team,
+                )
+                st.session_state.explanation_cache[explain_key] = (enemy_bonds, ally_bonds)
+            state["pick_explanations"][int(hero_id)] = (enemy_bonds, ally_bonds)
+
+    if m_type == "Transformer":
+        try:
+            full_ally = (ally_team + [0] * 5)[:5]
+            full_enemy = (enemy_team + [0] * 5)[:5]
+            current_heroes = full_ally + full_enemy
+            current_sides = [0] * 5 + [1] * 5
+            matrix, deltas, base_prob, role_prob = engine.get_full_analysis(current_heroes, current_sides)
+            state["matrix"] = matrix
+            state["deltas"] = deltas
+            state["base_prob"] = base_prob
+            state["role_prob"] = role_prob
+        except Exception as e:
+            state["matrix_error"] = e
+
+    return state
+
+
 left_col, right_col = st.columns([2, 1])
 
 
@@ -250,38 +313,53 @@ with left_col:
                 )
                 st.caption(t("language"))
                 LANG = "zh" if st.session_state.ui_lang == "中文" else "en"
+            
+            mode = st.secrets["mode"]
+            if mode == "dev":
+                with cfg_cols[1]:
+                    m_type = st.selectbox(t("algo"), ["Transformer", "XGBoost"], label_visibility="collapsed")
+                    st.caption(t("algo"))
 
-            with cfg_cols[1]:
-                m_type = st.selectbox(t("algo"), ["Transformer", "XGBoost"], label_visibility="collapsed")
-                st.caption(t("algo"))
+                with cfg_cols[2]:
+                    if m_type == "XGBoost":
+                        xgb_options = xgb_files if xgb_files else ["xgb_bp.model"]
+                        xgb_default = xgb_options.index("xgb_bp.model") if "xgb_bp.model" in xgb_options else 0
+                        selected_xgb = st.selectbox(t("xgb_file"), xgb_options, index=xgb_default, label_visibility="collapsed")
+                        m_path = str(MODELS_DIR / selected_xgb)
+                        st.caption(t("xgb_file"))
+                    else:
+                        transformer_options = torch_files if torch_files else ["stage3_value_network_best.pt"]
+                        transformer_default = transformer_options.index("stage3_value_network_best.pt") if "stage3_value_network_best.pt" in transformer_options else 0
+                        selected_transformer = st.selectbox(t("transformer_file"), transformer_options, index=transformer_default, label_visibility="collapsed")
+                        m_path = str(MODELS_DIR / selected_transformer)
+                        st.caption(t("transformer_file"))
 
-            with cfg_cols[2]:
-                if m_type == "XGBoost":
-                    xgb_options = xgb_files if xgb_files else ["xgb_bp.model"]
-                    xgb_default = xgb_options.index("xgb_bp.model") if "xgb_bp.model" in xgb_options else 0
-                    selected_xgb = st.selectbox(t("xgb_file"), xgb_options, index=xgb_default, label_visibility="collapsed")
-                    m_path = str(MODELS_DIR / selected_xgb)
-                    st.caption(t("xgb_file"))
-                else:
-                    transformer_options = torch_files if torch_files else ["dota_bert.pt"]
-                    transformer_default = transformer_options.index("dota_bert.pt") if "dota_bert.pt" in transformer_options else 0
-                    selected_transformer = st.selectbox(t("transformer_file"), transformer_options, index=transformer_default, label_visibility="collapsed")
-                    m_path = str(MODELS_DIR / selected_transformer)
-                    st.caption(t("transformer_file"))
-
-            with cfg_cols[3]:
-                if m_type == "XGBoost":
-                    emb_options = torch_files if torch_files else ["hero_embedding.pt"]
-                    emb_default = emb_options.index("hero_embedding.pt") if "hero_embedding.pt" in emb_options else 0
-                    selected_emb = st.selectbox(t("emb_file"), emb_options, index=emb_default, label_visibility="collapsed")
-                    e_path = str(MODELS_DIR / selected_emb)
-                    st.caption(t("emb_file"))
-                else:
-                    e_path = None
-                    st.caption(t("transformer_no_emb"))
+                with cfg_cols[3]:
+                    if m_type == "XGBoost":
+                        emb_options = torch_files if torch_files else ["hero_embedding.pt"]
+                        emb_default = emb_options.index("hero_embedding.pt") if "hero_embedding.pt" in emb_options else 0
+                        selected_emb = st.selectbox(t("emb_file"), emb_options, index=emb_default, label_visibility="collapsed")
+                        e_path = str(MODELS_DIR / selected_emb)
+                        st.caption(t("emb_file"))
+                    else:
+                        e_path = None
+                        st.caption(t("transformer_no_emb"))
+            else:
+                m_type = "Transformer"
+                m_path = str(MODELS_DIR / "stage3_value_network_best.pt")
+                e_path = None
 
             hero_name_path = str(DATA_DIR / "hero_id_to_name.json")
             engine, hero_id_to_name, valid_hero_ids = load_engine(m_type, m_path, e_path, hero_name_path)
+
+            inference_state = build_inference_state(
+                engine=engine,
+                m_type=m_type,
+                m_path=m_path,
+                ally_team=st.session_state.ally_team,
+                enemy_team=st.session_state.enemy_team,
+                valid_hero_ids=valid_hero_ids,
+            )
 
     with top_row[1]:
         winrate_placeholder = st.empty()  # 用于动态更新胜率显示
@@ -328,32 +406,8 @@ with right_col:
     if not st.session_state.ally_team and not st.session_state.enemy_team:
         st.info(t("select_hero_hint"))
     else:
-        if len(st.session_state.ally_team) < 5:
-            pick_results = engine.recommend(
-                current_ally=st.session_state.ally_team,
-                current_enemy=st.session_state.enemy_team,
-                valid_hero_ids=valid_hero_ids,
-                mode="pick"
-            )
-        else:
-            pick_results = []
-
-        if len(st.session_state.enemy_team) < 5:
-            ban_results = engine.recommend(
-                current_ally=st.session_state.ally_team,
-                current_enemy=st.session_state.enemy_team,
-                valid_hero_ids=valid_hero_ids,
-                mode="ban"
-            )
-        else:
-            ban_results = []
-
-        lineup_cache_key = (
-            m_type,
-            m_path,
-            tuple(st.session_state.ally_team),
-            tuple(st.session_state.enemy_team),
-        )
+        pick_results = inference_state["pick_results"]
+        ban_results = inference_state["ban_results"]
 
         st.subheader(t("reco_pick"))
         for i, (hero_id, score) in enumerate(pick_results):
@@ -368,16 +422,7 @@ with right_col:
                 with cols[1]:
                     st.markdown(f"**{i+1}. {name}** ({t('pred_score')}: `{float(score):.2f}`)")
                     if i < 5 and (st.session_state.ally_team or st.session_state.enemy_team):
-                        explain_key = lineup_cache_key + (int(hero_id),)
-                        if explain_key in st.session_state.explanation_cache:
-                            enemy_bonds, ally_bonds = st.session_state.explanation_cache[explain_key]
-                        else:
-                            enemy_bonds, ally_bonds = engine.get_explanation(
-                                hero_id,
-                                st.session_state.ally_team,
-                                st.session_state.enemy_team,
-                            )
-                            st.session_state.explanation_cache[explain_key] = (enemy_bonds, ally_bonds)
+                        enemy_bonds, ally_bonds = inference_state["pick_explanations"].get(int(hero_id), ([], []))
                         reasons = []
                         for e_id, e_val, e_delta in enemy_bonds:
                             e_name = hero_id_to_name.get(e_id, t("unknown"))
@@ -404,16 +449,17 @@ st.divider()
 with st.expander(t("matrix_expander"), expanded=True):
     if m_type == "Transformer":
         try:
-            # 1. 准备 10 人阵容数据（不足 5 人用 ID 0 补齐）
+            matrix = inference_state["matrix"]
+            deltas = inference_state["deltas"]
+            base_prob = inference_state["base_prob"]
+            role_probs = inference_state.get("role_prob")
+            if matrix is None or deltas is None or base_prob is None:
+                raise RuntimeError(inference_state["matrix_error"] or "matrix unavailable")
+
             full_ally = (st.session_state.ally_team + [0]*5)[:5]
             full_enemy = (st.session_state.enemy_team + [0]*5)[:5]
             current_heroes = full_ally + full_enemy
-            current_sides = [0]*5 + [1]*5
-            
-            # 2. 调用后端接口获取矩阵和抖动数据
-            # 确保你在 inference.py 的 TransformerInference 类里实现了 get_full_analysis
-            matrix, deltas, base_prob = engine.get_full_analysis(current_heroes, current_sides)
-            
+
             color = "green" if base_prob >= 0.5 else "red"
             winrate_placeholder.markdown(
                 f"<div style='text-align: right; color: {color}; font-size: 22px; font-weight: bold; margin-top: 25px;'>{t('current_winrate', winrate=base_prob * 100)}</div>", 
@@ -425,7 +471,29 @@ with st.expander(t("matrix_expander"), expanded=True):
             for i, h_id in enumerate(current_heroes):
                 name = hero_id_to_name.get(h_id, t("empty_slot"))
                 d_val = deltas[i]
-                hero_labels.append(f"{name}<br>({d_val:+.2f})")
+                
+                role_info_list = []
+                if h_id != 0 and role_probs is not None:
+                    probs = role_probs[i] # 获取该英雄 5 个位置的概率
+                    
+                    # 🌟 核心：找出所有概率显著的位置 (比如 > 20%)
+                    # 这样如果一个英雄 40% 打 1，35% 打 3，两个都会显示出来
+                    significant_indices = np.where(probs > 0.20)[0] 
+                    
+                    # 如果没超过 20% 的，就保底拿一个最高的
+                    if len(significant_indices) == 0:
+                        significant_indices = [np.argmax(probs)]
+                    
+                    # 按概率从大到小排序显示
+                    significant_indices = sorted(significant_indices, key=lambda idx: probs[idx], reverse=True)
+                    
+                    for idx in significant_indices:
+                        p_val = probs[idx] * 100
+                        role_info_list.append(f"P{idx+1}({p_val:.0f}%)")
+
+                # 拼接显示，例如：Pudge <br> P4(45%) P2(30%) <br> (+0.02)
+                role_str = f"<br><span style='font-size:10px; color:gray;'>{' '.join(role_info_list)}</span>"
+                hero_labels.append(f"{name}{role_str}<br>({d_val:+.2f})")
 
             # 4. 绘制交互式热力图
             fig = px.imshow(

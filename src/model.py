@@ -7,8 +7,10 @@ import torch.nn.functional as F
 class DotaMultiTaskTransformer(nn.Module):
     def __init__(self, num_heroes, embed_dim=64, nhead=8, num_layers=3):
         super().__init__()
+        self.pad_token_id = 0
         # 1. 共享 Embedding 层 (这就是你之后用来查“谁和 Puck 近”的)
-        self.hero_emb = nn.Embedding(num_heroes + 1, embed_dim)
+        # vocab: [PAD=0] + [real heroes: 1..num_heroes]
+        self.hero_emb = nn.Embedding(num_heroes + 1, embed_dim, padding_idx=self.pad_token_id)
         self.side_emb = nn.Embedding(2, embed_dim) # 0: 盟友, 1: 敌人
         self.win_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         # 2. 共享 Transformer Encoder 层
@@ -25,15 +27,13 @@ class DotaMultiTaskTransformer(nn.Module):
         self.win_head = nn.Sequential(
             # 第一层：宽一点，捕捉原始对位特征
             nn.Linear(concat_dim, embed_dim*4),
-            nn.BatchNorm1d(embed_dim*4),
+            nn.LayerNorm(embed_dim*4),
             nn.ReLU(),
-            nn.Dropout(0.2),
             
             # 第二层：压缩并提取高级战术语义（如阵容控制链、后期能力）
             nn.Linear(embed_dim*4, embed_dim*2),
-            nn.BatchNorm1d(embed_dim*2),
+            nn.LayerNorm(embed_dim*2),
             nn.ReLU(),
-            nn.Dropout(0.1),
             
             # 输出层
             nn.Linear(embed_dim*2, 1)
@@ -51,10 +51,7 @@ class DotaMultiTaskTransformer(nn.Module):
         batch_size = x.shape[0]
         # 把单个 win_token 扩展到当前 batch_size
         w_token = self.win_token.expand(batch_size, -1, -1)
-        w_side_idx = torch.zeros((batch_size, 1), dtype=torch.long, device=hero_ids.device)
-        w_token_with_side = w_token + self.side_emb(w_side_idx)
-        # 拼接到序列最前面 (位置 0)
-        x = torch.cat([w_token_with_side, x], dim=1)
+        x = torch.cat([w_token, x], dim=1)
 
         features = self.transformer(x) 
         

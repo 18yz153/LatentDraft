@@ -30,11 +30,9 @@ class TransformerInferenceEngine(DotaMultiTaskTransformer):
         batch_size = hero_ids.shape[0]
         x = self.hero_emb(hero_ids) + self.side_emb(side_ids)
         
-        # 🌟 修复 1：完美复刻 win_token 的 side_emb (保证特征分布一致)
+        # 把单个 win_token 扩展到当前 batch_size
         w_token = self.win_token.expand(batch_size, -1, -1)
-        w_side_idx = torch.zeros((batch_size, 1), dtype=torch.long, device=hero_ids.device)
-        w_token_with_side = w_token + self.side_emb(w_side_idx)
-        x = torch.cat([w_token_with_side, x], dim=1)
+        x = torch.cat([w_token, x], dim=1)
         
         win_mask = torch.zeros((batch_size, 1), dtype=torch.bool, device=x.device)
         hero_mask = (hero_ids == 0)
@@ -213,27 +211,29 @@ class TransformerInference(BaseInference):
         temp_e = (current_enemy + [0]*5)[:5]
         lineup = temp_a + temp_e
         is_ally = (mode == "pick")
+        
         if is_ally:
             mask_idx_in_seq = len(current_ally) 
-            if mask_idx_in_seq >= 5:
-                return [] # 已经满员了，没位置了
+            if mask_idx_in_seq >= 5: return [] 
         else:
             mask_idx_in_seq = 5 + len(current_enemy)
-            if mask_idx_in_seq >= 10:
-                return [] # 已经满员了，没位置了
+            if mask_idx_in_seq >= 10: return [] 
 
-        
         seq = torch.tensor([lineup]).to(self.device)
         sides = torch.tensor([[0]*5 + [1]*5]).to(self.device)
+        
         with torch.no_grad():
-            _, mask_logits, _, _ = self.engine.forward_with_attn(seq, sides)
+            # ⚡ 极速通道：不需要注意力，直接调原生 forward 拿 Mask
+            mask_logits, _, _ = self.engine(seq, sides)
             probs = torch.softmax(mask_logits[0, mask_idx_in_seq], dim=-1)
-        candidate_probs, candidate_ids = torch.topk(probs, k=50)
+        
+        # 🌟 优化：拿前 60 个候选去筛
+        candidate_probs, candidate_ids = torch.topk(probs, k=60)
         refined_candidates = []
         for p, h_id in zip(candidate_probs.tolist(), candidate_ids.tolist()):
             if h_id in valid_hero_ids and h_id not in used:
                 refined_candidates.append(h_id)
-            if len(refined_candidates) >= 30: # 拿 30 个种子选手去精选
+            if len(refined_candidates) >= 30:  # 🌟 严格截断到前 30
                 break
 
         if not refined_candidates:
@@ -245,21 +245,20 @@ class TransformerInference(BaseInference):
             case_lineup = list(lineup)
             case_lineup[mask_idx_in_seq] = h
             final_lineups.append(case_lineup)
+            
         batch_seq = torch.tensor(final_lineups).to(self.device)
         batch_sides = torch.tensor([[0]*5 + [1]*5] * len(final_lineups)).to(self.device)
         
         with torch.no_grad():
-            win_probs, _, _, _ = self.engine.forward_with_attn(batch_seq, batch_sides)
-            win_probs = win_probs.squeeze().cpu().numpy()       
+            _, win_logits, _ = self.engine(batch_seq, batch_sides)
+            # 🌟 同样拉平转 List
+            win_probs = torch.sigmoid(win_logits).view(-1).tolist()       
 
         final_results = []
-        # 如果只有一个候选人，win_probs 会变成标量，处理一下
-        if len(refined_candidates) == 1:
-            final_results.append((refined_candidates[0], float(win_probs)))
-        else:
-            for h, wp in zip(refined_candidates, win_probs):
-                final_results.append((h, float(wp)))         
-
+        # 不需要再 if else 判断数量了，直接 zip 遍历
+        for h, wp in zip(refined_candidates, win_probs):
+            final_results.append((h, float(wp)))
+        
         if mode == "pick":
             result = sorted(final_results, key=lambda x: x[1], reverse=True)[:topk]
         else:
@@ -268,102 +267,28 @@ class TransformerInference(BaseInference):
         self._cache_set(self._recommend_cache, key, result)
         return result
 
-    def get_explanation(self, target_hero_id, current_ally, current_enemy):
-        key = (self._lineup_key(current_ally, current_enemy), int(target_hero_id))
-        cached = self._cache_get(self._explanation_cache, key)
-        if cached is not None:
-            return cached
-
-        # 1. 基础阵容构造 [Ally x 5, Enemy x 5]
-        temp_a = (current_ally + [target_hero_id] + [0]*5)[:5]
-        temp_e = (current_enemy + [0]*5)[:5]
-        full_lineup = temp_a + temp_e
-        target_pos = len(current_ally)
-        
-        # 2. 构造 Batch 一次性跑完所有可能性
-        # Batch[0]: 完整阵容
-        # Batch[1-n]: 依次踢掉某个英雄后的阵容
-        inference_list = [full_lineup]
-        
-        # 记录每个位置对应的英雄ID (方便后续对应)
-        active_positions = [i for i, h in enumerate(full_lineup) if h != 0 and i != target_pos]
-        
-        for pos in active_positions:
-            modified = list(full_lineup)
-            modified[pos] = 0 # 踢掉这个英雄
-            inference_list.append(modified)
-            
-        # 转换为 Tensor (Batch 并行计算)
-        batch_seq = torch.tensor(inference_list).to(self.device)
-        batch_sides = torch.tensor([[0]*5 + [1]*5] * len(inference_list)).to(self.device)
-        
-        with torch.no_grad():
-            # 这里只需拿第一行的 weights (完整阵容的注意力)
-            probs, _, _, all_weights = self.engine.forward_with_attn(batch_seq, batch_sides)
-            
-        base_prob = probs[0].item()
-        attn_row = all_weights[0, target_pos].cpu().numpy() # [10]
-        
-        # 3. 结果组装
-        ally_results = []
-        enemy_results = []
-        
-        # 遍历所有扰动过的结果
-        for idx, pos in enumerate(active_positions):
-            h_id = full_lineup[pos]
-            attn_val = float(attn_row[pos])
-            # 扰动后的胜率结果在 probs[1:] 中
-            mutated_prob = probs[idx + 1].item()
-            
-            # 计算 delta: 
-            # 对于盟友: base - mutated > 0 代表他在场更有利 -> 配合
-            # 对于敌人: base - mutated > 0 代表他在场反而赢面大 -> 克制 (因为踢掉他胜率反而降了)
-            delta = base_prob - mutated_prob
-            
-            # 自动打标逻辑
-            if pos < 5: # 盟友区
-                ally_results.append((h_id, attn_val, delta))
-            else: # 敌人区
-                # 这里的逻辑：如果踢掉敌人胜率降了(delta > 0)，说明他在场我方更有利 -> 克制
-                enemy_results.append((h_id, attn_val, delta))
-        
-        # 4. 排序 (按 Attention 权重，因为注意力代表了关联的强度)
-        ally_results.sort(key=lambda x: x[1], reverse=True)
-        enemy_results.sort(key=lambda x: x[1], reverse=True)
-
-        result = (enemy_results, ally_results)
-        self._cache_set(self._explanation_cache, key, result)
-        return result
-    
     def get_full_analysis(self, hero_ids_list, side_ids_list):
-        """
-        hero_ids_list: 长度为 10 的 list
-        side_ids_list: 长度为 10 的 list
-        """
         key = (tuple(hero_ids_list), tuple(side_ids_list))
         cached = self._cache_get(self._analysis_cache, key)
         if cached is not None:
             return cached
 
-        # 1. 转换为 Tensor 并移动到正确的设备
         hero_ids = torch.tensor([hero_ids_list], dtype=torch.long).to(self.device)
         side_ids = torch.tensor([side_ids_list], dtype=torch.long).to(self.device)
         
-        # 2. 运行模型拿到全量数据 [1, 11, 11]
-        # 使用 torch.no_grad() 确保推理时不计算梯度，减少内存占用
         with torch.no_grad():
-            win_prob, _, role_, last_weights = self.engine.forward_with_attn(hero_ids, side_ids)
+            # 🔍 慢速通道：全景分析，必须手抠 Attention，同时拿到所有数据
+            win_prob, _, role_logits, last_weights = self.engine.forward_with_attn(hero_ids, side_ids)
             
-            # 【核心修正】：增加 .detach() 以剥离梯度
-            attn_matrix = last_weights[0].detach().cpu().numpy() # [11, 11]
-            
-            # 3. 提取英雄间 10x10 关注度 (跳过位置 0 的 win_token)
+            attn_matrix = last_weights[0].detach().cpu().numpy() 
             hero_to_hero_attn = attn_matrix[1:11, 1:11] 
-            
-            # 4. 抖动分析 (Delta)
-            deltas = []
             base_prob = win_prob.item()
+            
+            # ✨ 新增：获取场上 10 个人的详细位置预测概率 [10, 5]
+            # 对应每个位置的 (1号位, 2号位, 3号位, 4号位, 5号位) 概率
+            role_probs = torch.softmax(role_logits[0], dim=-1).cpu().numpy()
 
+            deltas = []
             valid_positions = [i for i, hid in enumerate(hero_ids_list) if hid != 0]
             if valid_positions:
                 mut_lineups = []
@@ -374,8 +299,10 @@ class TransformerInference(BaseInference):
 
                 mut_hero_ids = torch.tensor(mut_lineups, dtype=torch.long).to(self.device)
                 mut_side_ids = torch.tensor([side_ids_list] * len(mut_lineups), dtype=torch.long).to(self.device)
-                new_probs, _, _, _ = self.engine.forward_with_attn(mut_hero_ids, mut_side_ids)
-                new_probs = new_probs.view(-1).detach().cpu().numpy()
+                
+                # ⚡ 极速通道：算 Delta 的时候不需要看 Attention，直接调原生 forward 并行加速！
+                _, mut_win_logits, _ = self.engine(mut_hero_ids, mut_side_ids)
+                new_probs = torch.sigmoid(mut_win_logits).view(-1).cpu().numpy()
 
                 delta_map = {pos: float(prob - base_prob) for pos, prob in zip(valid_positions, new_probs)}
                 for i in range(10):
@@ -383,9 +310,69 @@ class TransformerInference(BaseInference):
             else:
                 deltas = [0.0] * 10
 
-        # 返回百分比矩阵和 Delta 列表
-        result = (hero_to_hero_attn * 100, deltas, base_prob)
+        # 返回：注意力矩阵, 抖动列表, 基础胜率, 🌟 位置概率预测
+        result = (hero_to_hero_attn * 100, deltas, base_prob, role_probs)
         self._cache_set(self._analysis_cache, key, result)
+        return result
+
+    def get_explanation(self, target_hero_id, current_ally, current_enemy):
+        key = (self._lineup_key(current_ally, current_enemy), int(target_hero_id))
+        cached = self._cache_get(self._explanation_cache, key)
+        if cached is not None:
+            return cached
+
+        temp_a = (current_ally + [target_hero_id] + [0]*5)[:5]
+        temp_e = (current_enemy + [0]*5)[:5]
+        full_lineup = temp_a + temp_e
+        target_pos = len(current_ally)
+        
+        seq = torch.tensor([full_lineup]).to(self.device)
+        sides = torch.tensor([[0]*5 + [1]*5]).to(self.device)
+        
+        with torch.no_grad():
+            # 🔍 慢速通道：算基础局，抠出 Attention
+            win_prob, _, _, last_weights = self.engine.forward_with_attn(seq, sides)
+            base_prob = win_prob.item()
+            attn_row = last_weights[0, target_pos].detach().cpu().numpy() # [11] 注意 win_token 占位
+
+        active_positions = [i for i, h in enumerate(full_lineup) if h != 0 and i != target_pos]
+        if not active_positions:
+            return [], []
+
+        inference_list = []
+        for pos in active_positions:
+            modified = list(full_lineup)
+            modified[pos] = 0 
+            inference_list.append(modified)
+            
+        batch_seq = torch.tensor(inference_list).to(self.device)
+        batch_sides = torch.tensor([[0]*5 + [1]*5] * len(inference_list)).to(self.device)
+        
+        with torch.no_grad():
+            _, mut_win_logits, _ = self.engine(batch_seq, batch_sides)
+            # 🌟 终极修复：强制拉平 (view(-1)) 并直接转原生 List，不管 1 个还是 N 个，永不报错！
+            mut_probs = torch.sigmoid(mut_win_logits).view(-1).tolist()
+
+        ally_results = []
+        enemy_results = []
+        
+        for idx, pos in enumerate(active_positions):
+            h_id = full_lineup[pos]
+            # attn_row 第 0 位是 win_token，所以英雄对应位置要 +1
+            attn_val = float(attn_row[pos + 1]) 
+            mutated_prob = mut_probs[idx]
+            delta = base_prob - mutated_prob
+            
+            if pos < 5: 
+                ally_results.append((h_id, attn_val, delta))
+            else: 
+                enemy_results.append((h_id, attn_val, delta))
+        
+        ally_results.sort(key=lambda x: x[1], reverse=True)
+        enemy_results.sort(key=lambda x: x[1], reverse=True)
+
+        result = (enemy_results, ally_results)
+        self._cache_set(self._explanation_cache, key, result)
         return result
     
 def load_embedding_payload(path: Path) -> Tuple[List[int], torch.Tensor]:
