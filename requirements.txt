@@ -11,3 +11,4 @@ scikit-learn
 mss
 matplotlib
 opencv-python-headless
+streamlit_paste_button
