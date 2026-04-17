@@ -364,12 +364,12 @@ with left_col:
 
     with top_row[1]:
         winrate_placeholder = st.empty()  # 用于动态更新胜率显示
-    if mode == "dev":
-        @st.cache_resource
-        def get_hero_detector():
-            return HeroDetector()
+    @st.cache_resource
+    def get_hero_detector():
+        return HeroDetector()
 
-        # --- 在 UI 适当位置插入 ---
+    # --- 在 UI 适当位置插入 ---
+    if mode == "dev":
         st.subheader("自动识别阵容")
         auto_cols = st.columns([1, 1, 2])
 
@@ -414,11 +414,11 @@ with left_col:
                 except Exception as e:
                     st.error(f"识别出错: {e}")
 
-        st.divider()
+            st.divider()
 
-        st.subheader(t("selected_lineup"))
-        render_selected_team(t("ally"), st.session_state.ally_team, "己方", "rm_ally")
-        render_selected_team(t("enemy"), st.session_state.enemy_team, "敌方", "rm_enemy")
+    st.subheader(t("selected_lineup"))
+    render_selected_team(t("ally"), st.session_state.ally_team, "己方", "rm_ally")
+    render_selected_team(t("enemy"), st.session_state.enemy_team, "敌方", "rm_enemy")
 
     filter_cols = st.columns([2, 1])
     with filter_cols[0]:
