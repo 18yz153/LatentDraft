@@ -13,7 +13,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--input",
 		type=Path,
-		default=Path("data/matchrole.json"),
+		default=Path("data/matchroleraw.json"),
 		help="Input JSON with player rows: match_id, player_slot, hero_id, lane_role, gold_per_min, tower_damage",
 	)
 	parser.add_argument(

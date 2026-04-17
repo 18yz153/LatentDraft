@@ -51,3 +51,8 @@ def load_hero_static_json():
     with open('data/heroes.json', 'r', encoding='utf-8') as f:
         raw = json.load(f)
     return {int(k): v for k, v in raw.items()}
+
+def load_heroes():
+    with open('data/heroes.json', 'r', encoding='utf-8') as f:
+        raw = json.load(f)
+    return {int(k): v for k, v in raw.items()}

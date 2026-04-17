@@ -185,7 +185,7 @@ def main() -> None:
         hero_pool, embedding = load_embedding_payload(emb_path)
 
     query_name = id_to_name.get(args.hero_id, "Unknown")
-    recs = topk_similar(hero_pool, embedding, args.hero_id, 100)
+    recs = topk_similar(hero_pool, embedding, args.hero_id, args.topk)
 
     print(f"query hero: id={args.hero_id} name={query_name}")
     print(f"top-{len(recs)} similar heroes:")
