@@ -3,7 +3,6 @@ import json
 import numpy as np
 import streamlit as st
 import xgboost as xgb
-from orc import HeroDetector
 from src.utils import load_embedding_payload, load_hero_id_to_name, load_hero_id_to_url_name
 from inference import XGBInference, TransformerInference
 import plotly.express as px
