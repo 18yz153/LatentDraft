@@ -13,3 +13,4 @@ venv/
 models/abondoned/
 models/checkpoint/
 .streamlit/
+hero_templates/

@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 
 class HeroDetector:
     def __init__(self):
-        # self.sct = mss.mss()
         
         # 初始化 ORB 和 匹配器
         self.orb = cv2.ORB_create(
@@ -22,32 +21,6 @@ class HeroDetector:
         )
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         
-        # 存储模板的特征描述符：{int_id: descriptors}
-        self.templates_des = {}
-        
-        temp_dir = Path("hero_templates")
-        temp_dir.mkdir(exist_ok=True)
-        heroes = load_heroes()
-        with mss.mss() as sct:
-            monitor = sct.monitors[1]
-            self.sw, self.sh = monitor["width"], monitor["height"]
-        
-        target_w = int(0.077 * self.sw) # 与 rw 一致
-        target_h = int(0.07 * self.sh)  # 与 rh 一致
-
-        for h_id, data in heroes.items():
-            local_path = temp_dir / f"{h_id}.png"
-            # [下载逻辑省略，保持你原有的即可]
-            if not local_path.exists(): continue
-            
-            img = cv2.imread(str(local_path))
-            if img is not None:
-                img = cv2.resize(img, (target_w, target_h))
-                gray_temp = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                # 预提取特征点和描述符
-                _, des = self.orb.detectAndCompute(gray_temp, None)
-                if des is not None:
-                    self.templates_des[int(h_id)] = des
 
     def get_auto_hero_regions(self, dection_area):
         # --- 1. 你的核心逻辑计算 ---
@@ -112,10 +85,33 @@ class HeroDetector:
             if max_matches >= 2:
                 team[i] = best_id
         return team
+    
+    def initialize(self,w, h):
+        self.templates_des = {}
+        
+        temp_dir = Path("hero_templates")
+        temp_dir.mkdir(exist_ok=True)
+        heroes = load_heroes() 
+
+        for h_id, data in heroes.items():
+            local_path = temp_dir / f"{h_id}.png"
+            if not local_path.exists(): 
+                response = requests.get(f"https://cdn.cloudflare.steamstatic.com{data['img']}")
+                with open(str(local_path), "wb") as f:
+                    f.write(response.content)
+
+            img = cv2.imread(str(local_path))
+            if img is not None:
+                img = cv2.resize(img, (w, h))
+                gray_temp = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                # 预提取特征点和描述符
+                _, des = self.orb.detectAndCompute(gray_temp, None)
+                if des is not None:
+                    self.templates_des[int(h_id)] = des
+
 
     def get_id_list(self, pasted_image):
         img_array = np.array(pasted_image.image_data.convert("RGB"))
-        print(f"输入图像尺寸: {img_array}")
         # PIL 是 RGB，OpenCV 是 BGR，必须转换，否则颜色识别会乱
         full_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
         sh, sw, _ = full_img.shape
@@ -127,10 +123,12 @@ class HeroDetector:
             "width": int(sw * 0.9), 
             "height": int(sh * 0.07)
         }
-        
-        strip_bgr = full_img[0:int(sh*0.07),:]
-        left_dection_area = full_img[0:int(sh*0.008),:strip_cfg["width"]//2]
-        right_dection_area = full_img[0:int(sh*0.008),strip_cfg["width"]//2:]
+        if sw/sh > 10:
+            strip_bgr = full_img
+        else:
+            strip_bgr = full_img[0:int(sh*0.07),:]
+        left_dection_area = full_img[0:8,:strip_cfg["width"]//2]
+        right_dection_area = full_img[0:8,strip_cfg["width"]//2:]
         left_strip = strip_bgr[:, :strip_cfg["width"]//2]
         right_strip = strip_bgr[:, strip_cfg["width"]//2:]
 
@@ -138,9 +136,13 @@ class HeroDetector:
         # 2. 自动获取 10 个英雄的坐标块
         rad_hero_blocks = self.get_auto_hero_regions(left_dection_area)
         dire_hero_blocks = self.get_auto_hero_regions(right_dection_area)
-        rad_team = self.detection(rad_hero_blocks, left_strip)
-        dire_team = self.detection(dire_hero_blocks, right_strip)
-            
+        w = rad_hero_blocks[0][1]
+        h = strip_bgr.shape[0]
+        self.initialize(w, h)
+
+        rad_team = self.detection(rad_hero_blocks[:5], left_strip)
+        dire_team = self.detection(dire_hero_blocks[:5], right_strip)
+
         all_ids = rad_team + dire_team     
         return all_ids
 
