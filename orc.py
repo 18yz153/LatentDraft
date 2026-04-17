@@ -49,46 +49,22 @@ class HeroDetector:
                 if des is not None:
                     self.templates_des[int(h_id)] = des
 
-    def get_auto_hero_regions(self, strip_bgr):
+    def get_auto_hero_regions(self, dection_area):
         # --- 1. 你的核心逻辑计算 ---
-        gray = cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(dection_area, cv2.COLOR_BGR2GRAY)
         h_strip, w_strip = gray.shape
-        sobelx = cv2.convertScaleAbs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))
 
-        sig_gray = np.sum(gray, axis=0).astype(float)
-        sig_sobel = np.sum(sobelx, axis=0).astype(float)
-
-        sig_gray /= (sig_gray.max() + 1e-6)
-        sig_sobel /= (sig_sobel.max() + 1e-6)
-
+        
+        max_color = np.max(dection_area, axis=2) 
+        combined = np.max(max_color, axis=0).astype(float)
         # 权重参数 1: 0.4 和 0.6
-        combined = 0.8 * sig_gray + 0.2 * sig_sobel
-        kernel_size = 15
-        combined_smoothed = np.convolve(combined, np.ones(kernel_size)/kernel_size, mode='same')
-        combined = combined_smoothed
-        # 参数 2: 屏蔽区宽度
-        center = w_strip // 2
-        mask_w = int(w_strip * 0.05) 
+        combined = combined
+        
 
-        # --- 2. 绘图准备 ---
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 8), sharex=True)
-
-        # 子图 1: 显示原图 + 识别框
-        ax1.imshow(cv2.cvtColor(strip_bgr, cv2.COLOR_BGR2RGB))
-        ax1.set_title("1. Detection Results (Green=Radiant, Red=Dire)")
-
-        # 子图 2: 信号分析
-        ax2.plot(combined, color='gray', alpha=0.5, label='Combined Signal')
-        ax2.fill_between(range(w_strip), combined, color='gray', alpha=0.1)
-
-        # 画出屏蔽区 (Timer Mask)
-        ax2.axvspan(center - mask_w, center + mask_w, color='yellow', alpha=0.2, label='Timer Mask')
 
         # 计算并画出阈值线
         # 参数 3: 0.5 乘数
-        threshold = np.mean(combined) * 0.8
-        combined[center - mask_w : center + mask_w] = 0
-        ax2.axhline(y=threshold, color='blue', linestyle='--', label=f'Threshold ({threshold:.2f})')
+        threshold = combined[10]*2
 
         # 执行识别逻辑
         binary = (combined > threshold).astype(np.uint8)
@@ -103,29 +79,42 @@ class HeroDetector:
             if w > w_strip * 0.03: # 参数 4: 0.03 最小宽度
                 candidates.append((x, w))
                 # 在信号图上标出候选块
-                ax2.fill_between(range(x, x+w), combined[x:x+w], color='orange', alpha=0.4)
 
         candidates.sort()
 
-        if len(candidates) >= 2:
-            gaps = [candidates[i+1][0] - (candidates[i][0] + candidates[i][1]) for i in range(len(candidates)-1)]
-            mid_idx = np.argmax(gaps)
-            radiant = candidates[:mid_idx+1][-5:]
-            dire = candidates[mid_idx+1:][:5]
+        return candidates
+
+    def detection(self, hero_blocks, strip_bgr, debug_mode=False):
+        team = [0,0,0,0,0]
+        
+        # 3. 遍历检测到的块进行识别
+        for i, (x, w) in enumerate(hero_blocks):
+            crop_bgr = strip_bgr[:, x:x+w]
+            crop_gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
             
-            # 在原图上画框
-            for x, w in radiant:
-                rect = plt.Rectangle((x, 0), w, h_strip, linewidth=2, edgecolor='lime', facecolor='none')
-                ax1.add_patch(rect)
-            for x, w in dire:
-                rect = plt.Rectangle((x, 0), w, h_strip, linewidth=2, edgecolor='red', facecolor='none')
-                ax1.add_patch(rect)
-            final_blocks = radiant + dire
-        # ax2.set_title("2. Signal Analysis & Parameter Tuning")
-        # ax2.legend(loc='upper right')
-        # plt.tight_layout()
-        # plt.show()
-        return [(x, 0, w, h_strip) for (x, w) in final_blocks]
+            # 记录识别的小图方便调试
+            if debug_mode:
+                cv2.imwrite(f"debug_auto_slot_{i}.png", crop_gray)
+            
+            # 特征点检测
+            kp_crop, des_crop = self.orb.detectAndCompute(crop_gray, None)
+            
+            if des_crop is None or len(kp_crop) < 60: # 稍微降低门槛，因为 crop 变精准了
+                continue
+
+            best_id, max_matches = 0, 0
+            for h_id, des_temp in self.templates_des.items():
+                matches = self.bf.match(des_crop, des_temp)
+                good_matches = [m for m in matches if m.distance < 45]
+                
+                if len(good_matches) > max_matches:
+                    max_matches = len(good_matches)
+                    best_id = h_id
+            
+            # 判定门槛
+            if max_matches >= 2:
+                team[i] = best_id
+        return team
 
     def get_id_list(self, debug_mode=False):
         ids = []
@@ -145,48 +134,23 @@ class HeroDetector:
             # 如果是 debug 模式且有 test.png，则模拟截取
             if debug_mode:
                 full_img = cv2.imread("test.png")
-                strip_bgr = full_img[0:int(sh*0.07), int(sw*0.05):int(sw*0.95)]
+                strip_bgr = full_img[0:int(sh*0.07),:]
             else:
                 strip_bgr = np.array(sct.grab(strip_cfg))[:,:,:3]
+            left_dection_area = full_img[0:int(sh*0.008),:strip_cfg["width"]//2]
+            right_dection_area = full_img[0:int(sh*0.008),strip_cfg["width"]//2:]
+            left_strip = strip_bgr[:, :strip_cfg["width"]//2]
+            right_strip = strip_bgr[:, strip_cfg["width"]//2:]
+
 
             # 2. 自动获取 10 个英雄的坐标块
-            hero_blocks = self.get_auto_hero_regions(strip_bgr)
+            rad_hero_blocks = self.get_auto_hero_regions(left_dection_area)
+            dire_hero_blocks = self.get_auto_hero_regions(right_dection_area)
+            rad_team = self.detection(rad_hero_blocks, left_strip, debug_mode)
+            dire_team = self.detection(dire_hero_blocks, right_strip, debug_mode)
             
-            if len(hero_blocks) < 10:
-                print(f"警告：仅检测到 {len(hero_blocks)} 个英雄槽位。")
-            
-            # 3. 遍历检测到的块进行识别
-            for i, (x, y, w, h) in enumerate(hero_blocks):
-                crop_bgr = strip_bgr[y:y+h, x:x+w]
-                crop_gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-                
-                # 记录识别的小图方便调试
-                if debug_mode:
-                    cv2.imwrite(f"debug_auto_slot_{i}.png", crop_gray)
-                
-                # 特征点检测
-                kp_crop, des_crop = self.orb.detectAndCompute(crop_gray, None)
-                
-                if des_crop is None or len(kp_crop) < 60: # 稍微降低门槛，因为 crop 变精准了
-                    ids.append(0)
-                    continue
-
-                best_id, max_matches = 0, 0
-                for h_id, des_temp in self.templates_des.items():
-                    matches = self.bf.match(des_crop, des_temp)
-                    good_matches = [m for m in matches if m.distance < 45]
-                    
-                    if len(good_matches) > max_matches:
-                        max_matches = len(good_matches)
-                        best_id = h_id
-                
-                # 判定门槛
-                if max_matches >= 2:
-                    ids.append(best_id)
-                else:
-                    ids.append(0)
-                    
-        return ids
+        all_ids = rad_team + dire_team     
+        return all_ids
 
 
 if __name__ == "__main__":

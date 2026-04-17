@@ -366,57 +366,57 @@ with left_col:
         winrate_placeholder = st.empty()  # 用于动态更新胜率显示
 
     # --- 在 UI 适当位置插入 ---
-    # if mode == "dev":
+    if mode == "dev":
         
-        # from orc import HeroDetector
-        # @st.cache_resource
-        # def get_hero_detector():
-        #     return HeroDetector()
-        # st.subheader("自动识别阵容")
-        # auto_cols = st.columns([1, 1, 2])
+        from orc import HeroDetector
+        @st.cache_resource
+        def get_hero_detector():
+            return HeroDetector()
+        st.subheader("自动识别阵容")
+        auto_cols = st.columns([1, 1, 2])
 
-        # with auto_cols[0]:
-        #     # 修复报错：显式指定 key="side_toggle"
-        #     is_right_side = st.toggle("我在右侧 (夜魇)", value=False, key="side_toggle")
+        with auto_cols[0]:
+            # 修复报错：显式指定 key="side_toggle"
+            is_right_side = st.toggle("我在右侧 (夜魇)", value=False, key="side_toggle")
 
-        # with auto_cols[1]:
-        #     if st.button("开始识别(3s后截图，请立即切换至游戏画面)", use_container_width=True, key="detect_btn"):
-        #         placeholder = st.empty() # 用于显示倒计时
+        with auto_cols[1]:
+            if st.button("开始识别(3s后截图，请立即切换至游戏画面)", use_container_width=True, key="detect_btn"):
+                placeholder = st.empty() # 用于显示倒计时
                 
-        #         # 倒计时逻辑
-        #         for i in range(3, 0, -1):
-        #             placeholder.warning(f"请立即切换至游戏画面... {i}s")
-        #             time.sleep(1)
+                # 倒计时逻辑
+                for i in range(3, 0, -1):
+                    placeholder.warning(f"请立即切换至游戏画面... {i}s")
+                    time.sleep(1)
                 
-        #         placeholder.info("正在截屏并识别...")
+                placeholder.info("正在截屏并识别...")
                 
-        #         try:
-        #             detector = get_hero_detector()
-        #             # 执行识别（确保你的 HeroDetector 在 get_id_list 里处理了最新的截屏）
-        #             detected_ids = detector.get_id_list(debug_mode=False) 
+                try:
+                    detector = get_hero_detector()
+                    # 执行识别（确保你的 HeroDetector 在 get_id_list 里处理了最新的截屏）
+                    detected_ids = detector.get_id_list(debug_mode=False) 
                     
-        #             if len(detected_ids) >= 10:
-        #                 # 默认前5天辉，后5夜魇
-        #                 radiant = [hid for hid in detected_ids[:5] if hid != 0]
-        #                 dire = [hid for hid in detected_ids[5:10] if hid != 0]
+                    if len(detected_ids) >= 10:
+                        # 默认前5天辉，后5夜魇
+                        radiant = [hid for hid in detected_ids[:5] if hid != 0]
+                        dire = [hid for hid in detected_ids[5:10] if hid != 0]
                         
-        #                 # 根据左右位置分配给 ally_team 或 enemy_team
-        #                 if not is_right_side:
-        #                     st.session_state.ally_team = radiant
-        #                     st.session_state.enemy_team = dire
-        #                 else:
-        #                     st.session_state.ally_team = dire
-        #                     st.session_state.enemy_team = radiant
+                        # 根据左右位置分配给 ally_team 或 enemy_team
+                        if not is_right_side:
+                            st.session_state.ally_team = radiant
+                            st.session_state.enemy_team = dire
+                        else:
+                            st.session_state.ally_team = dire
+                            st.session_state.enemy_team = radiant
                         
-        #                 placeholder.success("识别成功！")
-        #                 time.sleep(1) # 让用户看一眼成功提示
-        #                 st.rerun()
-        #             else:
-        #                 placeholder.error("识别到的英雄数量不足。")
-        #         except Exception as e:
-        #             st.error(f"识别出错: {e}")
+                        placeholder.success("识别成功！")
+                        time.sleep(1) # 让用户看一眼成功提示
+                        st.rerun()
+                    else:
+                        placeholder.error("识别到的英雄数量不足。")
+                except Exception as e:
+                    st.error(f"识别出错: {e}")
 
-        #     st.divider()
+            st.divider()
 
     st.subheader(t("selected_lineup"))
     render_selected_team(t("ally"), st.session_state.ally_team, "己方", "rm_ally")
