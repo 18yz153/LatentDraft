@@ -84,7 +84,7 @@ class HeroDetector:
 
         return candidates
 
-    def detection(self, hero_blocks, strip_bgr, debug_mode=False):
+    def detection(self, hero_blocks, strip_bgr):
         team = [0,0,0,0,0]
         
         # 3. 遍历检测到的块进行识别
@@ -92,9 +92,6 @@ class HeroDetector:
             crop_bgr = strip_bgr[:, x:x+w]
             crop_gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
             
-            # 记录识别的小图方便调试
-            if debug_mode:
-                cv2.imwrite(f"debug_auto_slot_{i}.png", crop_gray)
             
             # 特征点检测
             kp_crop, des_crop = self.orb.detectAndCompute(crop_gray, None)
@@ -116,38 +113,33 @@ class HeroDetector:
                 team[i] = best_id
         return team
 
-    def get_id_list(self, debug_mode=False):
-        ids = []
-        with mss.mss() as sct:
-            # 1. 一次性截取整条 (覆盖全屏宽度的 5% 到 95% 以确保包含所有英雄)
-            # 假设你的 strip 还是 0.07 高度
-            full_monitor = sct.monitors[1]
-            sw, sh = full_monitor["width"], full_monitor["height"]
+    def get_id_list(self, pasted_image):
+        img_array = np.array(pasted_image.image_data.convert("RGB"))
+        print(f"输入图像尺寸: {img_array}")
+        # PIL 是 RGB，OpenCV 是 BGR，必须转换，否则颜色识别会乱
+        full_img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        sh, sw, _ = full_img.shape
+        
             
-            strip_cfg = {
-                "left": int(sw * 0.05), 
-                "top": 0, 
-                "width": int(sw * 0.9), 
-                "height": int(sh * 0.07)
-            }
-            
-            # 如果是 debug 模式且有 test.png，则模拟截取
-            if debug_mode:
-                full_img = cv2.imread("test.png")
-                strip_bgr = full_img[0:int(sh*0.07),:]
-            else:
-                strip_bgr = np.array(sct.grab(strip_cfg))[:,:,:3]
-            left_dection_area = full_img[0:int(sh*0.008),:strip_cfg["width"]//2]
-            right_dection_area = full_img[0:int(sh*0.008),strip_cfg["width"]//2:]
-            left_strip = strip_bgr[:, :strip_cfg["width"]//2]
-            right_strip = strip_bgr[:, strip_cfg["width"]//2:]
+        strip_cfg = {
+            "left": int(sw * 0.05), 
+            "top": 0, 
+            "width": int(sw * 0.9), 
+            "height": int(sh * 0.07)
+        }
+        
+        strip_bgr = full_img[0:int(sh*0.07),:]
+        left_dection_area = full_img[0:int(sh*0.008),:strip_cfg["width"]//2]
+        right_dection_area = full_img[0:int(sh*0.008),strip_cfg["width"]//2:]
+        left_strip = strip_bgr[:, :strip_cfg["width"]//2]
+        right_strip = strip_bgr[:, strip_cfg["width"]//2:]
 
 
-            # 2. 自动获取 10 个英雄的坐标块
-            rad_hero_blocks = self.get_auto_hero_regions(left_dection_area)
-            dire_hero_blocks = self.get_auto_hero_regions(right_dection_area)
-            rad_team = self.detection(rad_hero_blocks, left_strip, debug_mode)
-            dire_team = self.detection(dire_hero_blocks, right_strip, debug_mode)
+        # 2. 自动获取 10 个英雄的坐标块
+        rad_hero_blocks = self.get_auto_hero_regions(left_dection_area)
+        dire_hero_blocks = self.get_auto_hero_regions(right_dection_area)
+        rad_team = self.detection(rad_hero_blocks, left_strip)
+        dire_team = self.detection(dire_hero_blocks, right_strip)
             
         all_ids = rad_team + dire_team     
         return all_ids
@@ -155,5 +147,5 @@ class HeroDetector:
 
 if __name__ == "__main__":
     detector = HeroDetector()
-    print(f"识别结果: {detector.get_id_list(debug_mode=True)}")
+    print(f"识别结果: {detector.get_id_list(cv2.imread('test.png'))}")
     

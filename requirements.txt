@@ -10,4 +10,4 @@ xgboost
 scikit-learn
 mss
 matplotlib
-opencv-python
+opencv-python-headless
