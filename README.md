@@ -91,3 +91,11 @@ This proves that the `WinHead` is not suffering from overconfidence or random gu
 AlphaDraft demonstrates that while the overarching outcome of a Dota 2 match is heavily dominated by in-game stochasticity and mechanical skill, a faint but decisive tactical signal exists within the draft phase. 
 
 By decoupling imitation learning (`MaskHead`) from value estimation (`WinHead`), AlphaDraft achieves something extraordinary: **It understands how humans draft, but recommends the mathematically optimal counter-pick that humans often miss.** It is a step toward true AI-assisted tactical coaching in high-dimensional imperfect information games.
+
+## License & Commercial Use
+
+This project is licensed under the AGPL-3.0 License - see the LICENSE file for details.
+
+Important Note: Under the AGPL-3.0 license, if you modify this code or use it as part of a server-side application/service (SaaS), you are required to open-source your entire backend code under the same license.
+
+If you wish to use this software in a closed-source commercial product or service, please contact me for a separate Commercial License.
