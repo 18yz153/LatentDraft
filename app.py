@@ -3,10 +3,10 @@ import json
 import numpy as np
 import streamlit as st
 import xgboost as xgb
+from orc import HeroDetector
 from src.utils import load_embedding_payload, load_hero_id_to_name, load_hero_id_to_url_name
 from inference import XGBInference, TransformerInference
 import plotly.express as px
-from orc import HeroDetector
 import time
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -364,12 +364,14 @@ with left_col:
 
     with top_row[1]:
         winrate_placeholder = st.empty()  # 用于动态更新胜率显示
-    @st.cache_resource
-    def get_hero_detector():
-        return HeroDetector()
 
     # --- 在 UI 适当位置插入 ---
     if mode == "dev":
+        
+        from orc import HeroDetector
+        @st.cache_resource
+        def get_hero_detector():
+            return HeroDetector()
         st.subheader("自动识别阵容")
         auto_cols = st.columns([1, 1, 2])
 
