@@ -367,74 +367,73 @@ with left_col:
         winrate_placeholder = st.empty()  # 用于动态更新胜率显示
 
     # --- 在 UI 适当位置插入 ---
-    if mode == "dev":
         
-        from orc import HeroDetector
-        def get_hero_detector():
-            return HeroDetector()
-        auto_cols = st.columns([1, 1, 3])
+    from orc import HeroDetector
+    def get_hero_detector():
+        return HeroDetector()
+    auto_cols = st.columns([1, 1, 3])
 
-        with auto_cols[0]:
-            # 修复报错：显式指定 key="side_toggle"
-            is_right_side = st.toggle("自动识别阵容，我在右侧 (夜魇)", value=False, key="side_toggle")
+    with auto_cols[0]:
+        # 修复报错：显式指定 key="side_toggle"
+        is_right_side = st.toggle("自动识别阵容，我在右侧 (夜魇)", value=False, key="side_toggle")
 
-        with auto_cols[1]:
+    with auto_cols[1]:
 
-            # --- 引导用户操作 ---
-            with st.expander("📖 如何使用？ (点此查看)", expanded=True):
-                st.markdown("""
-                1. 进入 **Dota 2 选人界面**。
-                2. 按下键盘上的 **`Alt` + `PrintScreen`** (这样只截取游戏窗口)或者**Win + Shift + S**（截取整个选人界面）来截图。
-                3. 切回本页面，点击下方的 **"📋 粘贴并识别"** 按钮。
-                4. 允许页面访问剪贴板中的截图，稍等片刻，系统会自动识别出双方英雄并填入已选阵容。
-                """)
+        # --- 引导用户操作 ---
+        with st.expander("📖 如何使用？ (点此查看)", expanded=True):
+            st.markdown("""
+            1. 进入 **Dota 2 选人界面**。
+            2. 按下键盘上的 **`Alt` + `PrintScreen`** (这样只截取游戏窗口)或者**Win + Shift + S**（截取整个选人界面）来截图。
+            3. 切回本页面，点击下方的 **"📋 粘贴并识别"** 按钮。
+            4. 允许页面访问剪贴板中的截图，稍等片刻，系统会自动识别出双方英雄并填入已选阵容。
+            """)
 
-            # --- 粘贴按钮 ---
-            # 该组件会直接返回一个 Image 对象
-        with auto_cols[2]:
-            if "last_pasted_hash" not in st.session_state:
-                st.session_state.last_pasted_hash = None
-            pasted_image = paste_image_button(
-                label="📋 粘贴并识别",
-                text_color="#ffffff",
-                background_color="#ff4b4b",
-                hover_background_color="#d33636",
-            )
-            placeholder = st.empty() 
-            if pasted_image.image_data is not None:
+        # --- 粘贴按钮 ---
+        # 该组件会直接返回一个 Image 对象
+    with auto_cols[2]:
+        if "last_pasted_hash" not in st.session_state:
+            st.session_state.last_pasted_hash = None
+        pasted_image = paste_image_button(
+            label="📋 粘贴并识别",
+            text_color="#ffffff",
+            background_color="#ff4b4b",
+            hover_background_color="#d33636",
+        )
+        placeholder = st.empty() 
+        if pasted_image.image_data is not None:
+            try:
+                img_bytes = pasted_image.image_data.tobytes()
+            except AttributeError:
+                img_bytes = str(pasted_image.image_data).encode('utf-8')
+            
+            current_hash = hash(img_bytes)
+            if current_hash != st.session_state.last_pasted_hash:
                 try:
-                    img_bytes = pasted_image.image_data.tobytes()
-                except AttributeError:
-                    img_bytes = str(pasted_image.image_data).encode('utf-8')
-                
-                current_hash = hash(img_bytes)
-                if current_hash != st.session_state.last_pasted_hash:
-                    try:
-                        detector = get_hero_detector()
-                        # 执行识别（确保你的 HeroDetector 在 get_id_list 里处理了最新的截屏）
-                        detected_ids = detector.get_id_list(pasted_image) 
+                    detector = get_hero_detector()
+                    # 执行识别（确保你的 HeroDetector 在 get_id_list 里处理了最新的截屏）
+                    detected_ids = detector.get_id_list(pasted_image) 
+                    
+                    if len(detected_ids) >= 10:
+                        # 默认前5天辉，后5夜魇
+                        radiant = [hid for hid in detected_ids[:5] if hid != 0]
+                        dire = [hid for hid in detected_ids[5:10] if hid != 0]
                         
-                        if len(detected_ids) >= 10:
-                            # 默认前5天辉，后5夜魇
-                            radiant = [hid for hid in detected_ids[:5] if hid != 0]
-                            dire = [hid for hid in detected_ids[5:10] if hid != 0]
-                            
-                            # 根据左右位置分配给 ally_team 或 enemy_team
-                            if not is_right_side:
-                                st.session_state.ally_team = radiant
-                                st.session_state.enemy_team = dire
-                            else:
-                                st.session_state.ally_team = dire
-                                st.session_state.enemy_team = radiant
-                            
-                            placeholder.success("识别成功！")
-                            st.session_state.last_pasted_hash = current_hash
+                        # 根据左右位置分配给 ally_team 或 enemy_team
+                        if not is_right_side:
+                            st.session_state.ally_team = radiant
+                            st.session_state.enemy_team = dire
                         else:
-                            placeholder.error("识别到的英雄数量不足。")
-                    except Exception as e:
-                        st.error(f"识别出错: {e}")
-            else:
-                placeholder.info("请尝试重新截图并粘贴。")
+                            st.session_state.ally_team = dire
+                            st.session_state.enemy_team = radiant
+                        
+                        placeholder.success("识别成功！")
+                        st.session_state.last_pasted_hash = current_hash
+                    else:
+                        placeholder.error("识别到的英雄数量不足。")
+                except Exception as e:
+                    st.error(f"识别出错: {e}")
+        else:
+            placeholder.info("请尝试重新截图并粘贴。")
 
 
     st.subheader(t("selected_lineup"))
